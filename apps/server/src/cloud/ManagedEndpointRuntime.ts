@@ -258,7 +258,14 @@ export const make = Effect.gen(function* () {
             const desiredConfig = yield* Ref.get(desiredConfigRef);
             if (!desiredConfig || desiredConfig.providerKind !== "cloudflare_tunnel") return;
             const active = yield* Ref.get(activeRef);
-            if (active?.executable.executablePath === installed.executablePath) return;
+            // A self-updated binary in the pinned folder shares the installed path,
+            // so the version decides whether the running connector is current.
+            if (
+              active?.executable.executablePath === installed.executablePath &&
+              active.executable.version === installed.version
+            ) {
+              return;
+            }
             yield* Effect.logInfo("Relay client installed; restarting the connector on it", {
               version: installed.version,
               previousVersion: active?.executable.version,

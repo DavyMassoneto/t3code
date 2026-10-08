@@ -1135,4 +1135,47 @@ describe("CloudManagedEndpointRuntime", () => {
       expect(Option.getOrThrow(yield* Stream.runHead(runtime.recoveryRequests))).toEqual(config);
     }),
   );
+
+  it.effect("restarts a self-updated pinned-folder connector once the pin is reinstalled", () =>
+    Effect.gen(function* () {
+      const executablePath = "/managed/pinned/cloudflared";
+      let version = "2026.9.3";
+      const releaseInstall = yield* Deferred.make<void>();
+      const spawned = yield* Queue.unbounded<string>();
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.gen(function* () {
+          yield* Queue.offer(spawned, version);
+          const handle = makeHandle({ pid: 7, onKill: () => {} });
+          yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+          return handle;
+        }),
+      );
+      const current = () =>
+        ({ status: "available", executablePath, source: "managed", version }) as const;
+      const runtime = yield* buildCloudManagedEndpointRuntime(
+        spawner,
+        Layer.succeed(
+          RelayClient.RelayClient,
+          RelayClient.RelayClient.of({
+            resolve: Effect.sync(current),
+            install: Deferred.await(releaseInstall).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  version = RelayClient.CLOUDFLARED_VERSION;
+                  return current();
+                }),
+              ),
+            ),
+            installWithProgress: () => Effect.die("unused"),
+            pruneManagedVersions: Effect.void,
+          }),
+        ),
+      );
+
+      yield* runtime.applyConfig({ providerKind: "cloudflare_tunnel", connectorToken: "token" });
+      expect(yield* Queue.take(spawned)).toBe("2026.9.3");
+      yield* Deferred.succeed(releaseInstall, undefined);
+      expect(yield* Queue.take(spawned)).toBe(RelayClient.CLOUDFLARED_VERSION);
+    }),
+  );
 });
