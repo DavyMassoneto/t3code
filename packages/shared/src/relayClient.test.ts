@@ -398,6 +398,10 @@ describe("RelayClient", () => {
               const older = managedPathFor(baseDir, "2025.9.0");
               const newer = managedPathFor(baseDir, "2026.1.0");
               const pinned = managedPathFor(baseDir, RelayClient.CLOUDFLARED_VERSION);
+              // A newer server sharing this base dir owns this folder.
+              const newerServer = managedPathFor(baseDir, "2099.1.0");
+              versions[newerServer] = "2099.1.0";
+              yield* writeExecutable(newerServer);
               versions[pathBinary] = "2026.9.3";
               versions[older] = "2025.9.0";
               versions[newer] = "2026.1.0";
@@ -422,9 +426,9 @@ describe("RelayClient", () => {
               });
 
               yield* manager.pruneManagedVersions;
-              expect(yield* fileSystem.readDirectory(`${baseDir}/tools/cloudflared`)).toEqual([
-                RelayClient.CLOUDFLARED_VERSION,
-              ]);
+              expect(
+                (yield* fileSystem.readDirectory(`${baseDir}/tools/cloudflared`)).sort(),
+              ).toEqual([RelayClient.CLOUDFLARED_VERSION, "2099.1.0"]);
 
               yield* fileSystem.remove(pinned);
               expect(yield* resolveWith).toMatchObject({ source: "path", version: "2026.9.3" });
@@ -435,7 +439,7 @@ describe("RelayClient", () => {
     );
 
     it.effect.skipIf(windowsHost)(
-      "ignores a managed binary that replaced itself with another release",
+      "keeps a self-updated managed binary as a fallback but still installs the pin",
       () => {
         const versions: Record<string, string> = {};
         return run(
@@ -445,10 +449,16 @@ describe("RelayClient", () => {
               versions[pinned] = "2026.9.3";
               yield* writeExecutable(pinned);
               const manager = yield* RelayClient.makeCloudflaredRelayClient({ baseDir });
-              expect(yield* manager.resolve).toEqual({
-                status: "missing",
-                version: RelayClient.CLOUDFLARED_VERSION,
+              const resolved = yield* manager.resolve;
+              expect(resolved).toEqual({
+                status: "available",
+                executablePath: pinned,
+                source: "managed",
+                version: "2026.9.3",
               });
+              expect(
+                resolved.status === "available" && RelayClient.isPinnedManagedRelayClient(resolved),
+              ).toBe(false);
             }),
           { versions },
         );

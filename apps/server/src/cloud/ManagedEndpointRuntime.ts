@@ -264,7 +264,13 @@ export const make = Effect.gen(function* () {
               previousVersion: active?.executable.version,
             });
             yield* stopActive;
-            yield* reconcileConfig(desiredConfig);
+            const status = yield* reconcileConfig(desiredConfig);
+            // The old connector is gone and no supervisor watches a failed spawn,
+            // so ask for recovery like an exited connector would.
+            if (status.status === "failed") {
+              yield* Effect.logWarning("Relay client did not start after the update", status);
+              yield* Queue.offer(recoveryRequests, desiredConfig);
+            }
           }),
         ),
       ),

@@ -140,8 +140,9 @@ export interface CloudflaredRelayClientOptions {
 export interface RelayClientShape {
   /**
    * Finds the relay client to run, without downloading anything: the override,
-   * else the pinned managed release, else the newest older managed release, else
-   * `cloudflared` on PATH. Every candidate must report a compatible version.
+   * else the pinned managed folder, else the newest older managed folder, else
+   * `cloudflared` on PATH. Every candidate must report a compatible version, and
+   * the status carries the version the binary reports.
    */
   readonly resolve: Effect.Effect<RelayClientStatus>;
   /** Installs the pinned managed release unless it, or a valid override, is already present. */
@@ -149,7 +150,7 @@ export interface RelayClientShape {
   readonly installWithProgress: (
     report: (event: RelayClientInstallProgressEvent) => Effect.Effect<void>,
   ) => Effect.Effect<AvailableRelayClient, RelayClientInstallError>;
-  /** Removes managed releases other than the pinned one. Call once the pinned release has connected. */
+  /** Removes managed releases older than the pin. Call once the pinned release has connected. */
   readonly pruneManagedVersions: Effect.Effect<void>;
 }
 
@@ -314,13 +315,18 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
     return { status: "available", executablePath, source, version } satisfies AvailableRelayClient;
   });
 
-  // Managed releases on disk other than the pinned one, newest first.
+  // Managed releases older than the pin, newest first. Newer folders belong to
+  // a newer server sharing this base dir and are never used or pruned here.
   const olderManagedVersions = Effect.gen(function* () {
     const entries = yield* fileSystem
       .readDirectory(managedRoot)
       .pipe(Effect.orElseSucceed(() => []));
     return entries
-      .filter((entry) => entry !== CLOUDFLARED_VERSION && parseVersion(entry) !== null)
+      .filter(
+        (entry) =>
+          parseVersion(entry) !== null &&
+          compareCloudflaredVersions(entry, CLOUDFLARED_VERSION) < 0,
+      )
       .sort((left, right) => compareCloudflaredVersions(right, left));
   });
 
@@ -357,10 +363,13 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
       const override = yield* compatibleCandidate(config.executableOverride.value, "override");
       return override ?? missingStatus;
     }
-    const pinned = yield* compatibleCandidate(managedPath, "managed", CLOUDFLARED_VERSION);
+    // A managed binary reports the version it actually runs. One that replaced
+    // itself in place still serves as a fallback; the runtime sees it is not the
+    // pinned release and installs that.
+    const pinned = yield* compatibleCandidate(managedPath, "managed");
     if (pinned) return pinned;
     for (const version of yield* olderManagedVersions) {
-      const older = yield* compatibleCandidate(managedPathFor(version), "managed", version);
+      const older = yield* compatibleCandidate(managedPathFor(version), "managed");
       if (older) return older;
     }
     const pathExecutable = yield* resolvePathExecutable;

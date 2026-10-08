@@ -137,15 +137,18 @@ The host runs `cloudflared` pinned by `CLOUDFLARED_VERSION` in
 (version, URLs, and checksums) is the whole release step. A linked host that
 starts a server with a new pin keeps its connector up on the newest older managed
 release (or a `cloudflared` on `PATH`), installs the pinned one in the background,
-then restarts only the connector child on it. Once the pinned release registers a
-connection, older managed releases are deleted. An explicit
-`T3CODE_CLOUDFLARED_PATH` is never replaced.
+then restarts only the connector child on it. If that restart fails to spawn, the
+host requests recovery as it would for an exited connector. Once the pinned
+release registers a connection, managed releases older than the pin are deleted;
+newer ones belong to a newer server sharing the same T3 home and are left alone.
+An explicit `T3CODE_CLOUDFLARED_PATH` is never replaced.
 
 The version comes from running `cloudflared version`, not from the folder name.
-Connectors from before `--no-autoupdate` replaced themselves in place, so the
-managed folder can hold another release. Binaries outside the managed folder only
-need `CLOUDFLARED_MIN_VERSION`, the oldest release that accepts every flag the
-connector is started with. Raise it whenever a new flag is added.
+Connectors from before `--no-autoupdate` replaced themselves in place, so a
+managed folder can hold another release. Such a binary still runs as a fallback
+while the pin installs. Every binary needs `CLOUDFLARED_MIN_VERSION`, the oldest
+release that accepts every flag the connector is started with. Raise it whenever
+a new flag is added.
 
 ## OAuth traps
 
