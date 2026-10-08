@@ -1,3 +1,4 @@
+import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
 import type {
   RelayClientInstallProgressEvent,
@@ -190,6 +191,13 @@ export function parseCloudflaredVersionOutput(output: string): string | null {
   return version ? version.join(".") : null;
 }
 
+// A changed file is a new key, so a replaced binary is probed again.
+class VersionProbeKey extends Data.Class<{
+  readonly executablePath: string;
+  readonly size: number;
+  readonly mtimeMillis: number;
+}> {}
+
 function isAlreadyExists(error: PlatformError.PlatformError): boolean {
   return error.reason._tag === "AlreadyExists";
 }
@@ -247,31 +255,35 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
     return platform === "win32" || (info.value.mode & 0o111) !== 0;
   });
 
-  // `cloudflared version` costs a process spawn, so its answer is kept until the
-  // file changes. Before `--no-autoupdate`, a managed binary could replace itself
-  // in place, so the version is read from the binary, never from its folder name.
-  const versionCache = new Map<
-    string,
-    { readonly stamp: string; readonly version: string | null }
-  >();
+  // `cloudflared version` costs a process spawn, so answers are cached per file
+  // revision. Before `--no-autoupdate`, a managed binary could replace itself in
+  // place, so the version is read from the binary, never from its folder name.
+  const versionCache = yield* Cache.make({
+    capacity: 16,
+    lookup: (key: VersionProbeKey) =>
+      spawner
+        .string(
+          ChildProcess.make(key.executablePath, ["version"], { stdin: "ignore", stderr: "ignore" }),
+        )
+        .pipe(
+          Effect.map(parseCloudflaredVersionOutput),
+          Effect.timeoutOption(VERSION_PROBE_TIMEOUT),
+          Effect.map(Option.getOrNull),
+          Effect.orElseSucceed(() => null),
+        ),
+  });
   const probeVersion = Effect.fn("cloudflared.probeVersion")(function* (executablePath: string) {
     const info = yield* fileSystem.stat(executablePath).pipe(Effect.option);
     if (Option.isNone(info) || info.value.type !== "File") return null;
     if (platform !== "win32" && (info.value.mode & 0o111) === 0) return null;
-    const mtime = Option.getOrUndefined(info.value.mtime)?.getTime() ?? 0;
-    const stamp = `${String(info.value.size)}:${mtime}`;
-    const cached = versionCache.get(executablePath);
-    if (cached?.stamp === stamp) return cached.version;
-    const version = yield* spawner
-      .string(ChildProcess.make(executablePath, ["version"], { stdin: "ignore", stderr: "ignore" }))
-      .pipe(
-        Effect.map(parseCloudflaredVersionOutput),
-        Effect.timeoutOption(VERSION_PROBE_TIMEOUT),
-        Effect.map(Option.getOrNull),
-        Effect.orElseSucceed(() => null),
-      );
-    versionCache.set(executablePath, { stamp, version });
-    return version;
+    return yield* Cache.get(
+      versionCache,
+      new VersionProbeKey({
+        executablePath,
+        size: Number(info.value.size),
+        mtimeMillis: Option.getOrUndefined(info.value.mtime)?.getTime() ?? 0,
+      }),
+    );
   });
 
   const compatibleCandidate = Effect.fn("cloudflared.compatibleCandidate")(function* (
