@@ -285,6 +285,14 @@ export const make = Effect.gen(function* () {
     );
   }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
 
+  // A connector running on anything but the pinned release keeps retrying the
+  // install, since applyConfig returns early while that connector is healthy.
+  // The retry interval inside ensurePinnedRelayClient spaces the attempts out.
+  const retryPinnedRelayClientInstall = ensurePinnedRelayClient.pipe(
+    Effect.delay(Duration.millis(RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS)),
+    Effect.forever,
+  );
+
   // Requests recovery while the connector has not registered a connection,
   // once per timeout, until it connects or is replaced.
   const watchConnectorRegistration = (connector: ActiveConnector) =>
@@ -485,6 +493,9 @@ export const make = Effect.gen(function* () {
       yield* Effect.forkIn(observeConnectorOutput(connector), connectorScope);
       yield* Effect.forkIn(superviseConnector(connector), connectorScope);
       yield* Effect.forkIn(watchConnectorRegistration(connector), connectorScope);
+      if (executable.source !== "override" && !RelayClient.isPinnedManagedRelayClient(executable)) {
+        yield* Effect.forkIn(retryPinnedRelayClientInstall, connectorScope);
+      }
       return {
         status: "running",
         providerKind: "cloudflare_tunnel",

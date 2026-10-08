@@ -8,7 +8,9 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Data from "effect/Data";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -258,9 +260,10 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
   // `cloudflared version` costs a process spawn, so answers are cached per file
   // revision. Before `--no-autoupdate`, a managed binary could replace itself in
   // place, so the version is read from the binary, never from its folder name.
-  const versionCache = yield* Cache.make({
-    capacity: 16,
-    lookup: (key: VersionProbeKey) =>
+  // A failed or timed-out probe is not cached, so a slow spawn under an AV scan
+  // does not hide a good binary until it changes on disk.
+  const versionCache = yield* Cache.makeWith(
+    (key: VersionProbeKey) =>
       spawner
         .string(
           ChildProcess.make(key.executablePath, ["version"], { stdin: "ignore", stderr: "ignore" }),
@@ -271,7 +274,12 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
           Effect.map(Option.getOrNull),
           Effect.orElseSucceed(() => null),
         ),
-  });
+    {
+      capacity: 16,
+      timeToLive: (exit) =>
+        Exit.isSuccess(exit) && exit.value !== null ? Duration.infinity : Duration.zero,
+    },
+  );
   const probeVersion = Effect.fn("cloudflared.probeVersion")(function* (executablePath: string) {
     const info = yield* fileSystem.stat(executablePath).pipe(Effect.option);
     if (Option.isNone(info) || info.value.type !== "File") return null;

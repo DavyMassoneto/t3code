@@ -1013,4 +1013,68 @@ describe("CloudManagedEndpointRuntime", () => {
       expect(install).not.toHaveBeenCalled();
     }),
   );
+
+  it.effect("retries a failed background install while the older connector keeps running", () =>
+    Effect.gen(function* () {
+      const olderClient = {
+        status: "available",
+        executablePath: "/managed/2025.9.0/cloudflared",
+        source: "managed",
+        version: "2025.9.0",
+      } as const;
+      const pinnedClient = {
+        status: "available",
+        executablePath: "/managed/pinned/cloudflared",
+        source: "managed",
+        version: RelayClient.CLOUDFLARED_VERSION,
+      } as const;
+      let installed = false;
+      let installAttempts = 0;
+      const spawned = yield* Queue.unbounded<string>();
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          yield* Queue.offer(
+            spawned,
+            ChildProcess.isStandardCommand(command) ? command.command : "",
+          );
+          const handle = makeHandle({ pid: 5, onKill: () => {} });
+          yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+          return handle;
+        }),
+      );
+      const runtime = yield* buildCloudManagedEndpointRuntime(
+        spawner,
+        Layer.succeed(
+          RelayClient.RelayClient,
+          RelayClient.RelayClient.of({
+            resolve: Effect.sync(() => (installed ? pinnedClient : olderClient)),
+            install: Effect.suspend(() => {
+              installAttempts += 1;
+              if (installAttempts === 1) {
+                return Effect.fail(
+                  new RelayClient.RelayClientInstallError({
+                    reason: "download_failed",
+                    message: "offline",
+                  }),
+                );
+              }
+              installed = true;
+              return Effect.succeed(pinnedClient);
+            }),
+            installWithProgress: () => Effect.die("unused"),
+            pruneManagedVersions: Effect.void,
+          }),
+        ),
+      );
+
+      yield* runtime.applyConfig({ providerKind: "cloudflare_tunnel", connectorToken: "token" });
+      expect(yield* Queue.take(spawned)).toBe(olderClient.executablePath);
+      yield* Effect.yieldNow;
+      expect(installAttempts).toBe(1);
+
+      yield* TestClock.adjust(Duration.minutes(10));
+      expect(yield* Queue.take(spawned)).toBe(pinnedClient.executablePath);
+      expect(installAttempts).toBe(2);
+    }),
+  );
 });
