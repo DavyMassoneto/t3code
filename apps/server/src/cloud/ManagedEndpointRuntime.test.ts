@@ -29,6 +29,7 @@ const layerRelayClientAvailable = Layer.succeed(
     }),
     install: Effect.die("unused"),
     installWithProgress: () => Effect.die("unused"),
+    pruneManagedVersions: Effect.void,
   }),
 );
 
@@ -829,6 +830,7 @@ describe("CloudManagedEndpointRuntime", () => {
             }),
             install: Effect.die("unused"),
             installWithProgress: () => Effect.die("unused"),
+            pruneManagedVersions: Effect.void,
           }),
         ),
       );
@@ -845,6 +847,170 @@ describe("CloudManagedEndpointRuntime", () => {
         reason: "The relay client is not installed.",
       });
       expect(spawn).not.toHaveBeenCalled();
+    }),
+  );
+
+  it.effect(
+    "runs an older relay client while the pinned one installs, then restarts on it and prunes",
+    () =>
+      Effect.gen(function* () {
+        const olderClient = {
+          status: "available",
+          executablePath: "/managed/2025.9.0/cloudflared",
+          source: "managed",
+          version: "2025.9.0",
+        } as const;
+        const pinnedClient = {
+          status: "available",
+          executablePath: "/managed/pinned/cloudflared",
+          source: "managed",
+          version: RelayClient.CLOUDFLARED_VERSION,
+        } as const;
+        let installed = false;
+        const releaseInstall = yield* Deferred.make<void>();
+        const pruned = yield* Deferred.make<void>();
+        const spawned = yield* Queue.unbounded<string>();
+        const killed: Array<string> = [];
+        const output = yield* Queue.unbounded<Uint8Array>();
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            const executable = ChildProcess.isStandardCommand(command) ? command.command : "";
+            yield* Queue.offer(spawned, executable);
+            const handle = makeHandle({
+              pid: executable === pinnedClient.executablePath ? 2 : 1,
+              onKill: () => killed.push(executable),
+              ...(executable === pinnedClient.executablePath
+                ? { output: Stream.fromQueue(output) }
+                : {}),
+            });
+            yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+            return handle;
+          }),
+        );
+        const runtime = yield* buildCloudManagedEndpointRuntime(
+          spawner,
+          Layer.succeed(
+            RelayClient.RelayClient,
+            RelayClient.RelayClient.of({
+              resolve: Effect.sync(() => (installed ? pinnedClient : olderClient)),
+              install: Deferred.await(releaseInstall).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    installed = true;
+                    return pinnedClient;
+                  }),
+                ),
+              ),
+              installWithProgress: () => Effect.die("unused"),
+              pruneManagedVersions: Deferred.succeed(pruned, undefined).pipe(Effect.asVoid),
+            }),
+          ),
+        );
+
+        const status = yield* runtime.applyConfig({
+          providerKind: "cloudflare_tunnel",
+          connectorToken: "token",
+        });
+        expect(status).toMatchObject({ status: "running", pid: 1 });
+        expect(yield* Queue.take(spawned)).toBe(olderClient.executablePath);
+
+        yield* Deferred.succeed(releaseInstall, undefined);
+        expect(yield* Queue.take(spawned)).toBe(pinnedClient.executablePath);
+        expect(killed).toEqual([olderClient.executablePath]);
+
+        yield* Queue.offer(
+          output,
+          new TextEncoder().encode(
+            "2026-10-08T00:00:00Z INF Registered tunnel connection connIndex=0\n",
+          ),
+        );
+        yield* Deferred.await(pruned);
+      }),
+  );
+
+  it.effect("installs a missing relay client in the background and then starts it", () =>
+    Effect.gen(function* () {
+      const pinnedClient = {
+        status: "available",
+        executablePath: "/managed/pinned/cloudflared",
+        source: "managed",
+        version: RelayClient.CLOUDFLARED_VERSION,
+      } as const;
+      let installed = false;
+      const spawned = yield* Deferred.make<string>();
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(
+            spawned,
+            ChildProcess.isStandardCommand(command) ? command.command : "",
+          );
+          const handle = makeHandle({ pid: 3, onKill: () => {} });
+          yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+          return handle;
+        }),
+      );
+      const runtime = yield* buildCloudManagedEndpointRuntime(
+        spawner,
+        Layer.succeed(
+          RelayClient.RelayClient,
+          RelayClient.RelayClient.of({
+            resolve: Effect.sync(() =>
+              installed
+                ? pinnedClient
+                : { status: "missing" as const, version: RelayClient.CLOUDFLARED_VERSION },
+            ),
+            install: Effect.sync(() => {
+              installed = true;
+              return pinnedClient;
+            }),
+            installWithProgress: () => Effect.die("unused"),
+            pruneManagedVersions: Effect.void,
+          }),
+        ),
+      );
+
+      const status = yield* runtime.applyConfig({
+        providerKind: "cloudflare_tunnel",
+        connectorToken: "token",
+      });
+      // The first attempt reports the gap; the install then starts the connector itself.
+      expect(status).toMatchObject({ status: "failed", failure: "not-installed" });
+      expect(yield* Deferred.await(spawned)).toBe(pinnedClient.executablePath);
+    }),
+  );
+
+  it.effect("leaves an override relay client alone", () =>
+    Effect.gen(function* () {
+      const install = vi.fn(() => Effect.die("unexpected install"));
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.gen(function* () {
+          const handle = makeHandle({ pid: 4, onKill: () => {} });
+          yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+          return handle;
+        }),
+      );
+      const runtime = yield* buildCloudManagedEndpointRuntime(
+        spawner,
+        Layer.succeed(
+          RelayClient.RelayClient,
+          RelayClient.RelayClient.of({
+            resolve: Effect.succeed({
+              status: "available",
+              executablePath: "/opt/cloudflared",
+              source: "override",
+              version: "2025.10.0",
+            }),
+            install: Effect.suspend(install),
+            installWithProgress: () => Effect.die("unused"),
+            pruneManagedVersions: Effect.void,
+          }),
+        ),
+      );
+      expect(
+        yield* runtime.applyConfig({ providerKind: "cloudflare_tunnel", connectorToken: "token" }),
+      ).toMatchObject({ status: "running", pid: 4 });
+      yield* Effect.yieldNow;
+      expect(install).not.toHaveBeenCalled();
     }),
   );
 });

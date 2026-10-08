@@ -130,6 +130,23 @@ and clients keep their bindings. Every mutation on an allocation bumps its
 `generation`, and deletion locks the row at the generation it claimed, so a
 host that reconnects mid-sweep wins.
 
+## The relay client follows the server's pin
+
+The host runs `cloudflared` pinned by `CLOUDFLARED_VERSION` in
+[`relayClient.ts`](../../packages/shared/src/relayClient.ts), and bumping it there
+(version, URLs, and checksums) is the whole release step. A linked host that
+starts a server with a new pin keeps its connector up on the newest older managed
+release (or a `cloudflared` on `PATH`), installs the pinned one in the background,
+then restarts only the connector child on it. Once the pinned release registers a
+connection, older managed releases are deleted. An explicit
+`T3CODE_CLOUDFLARED_PATH` is never replaced.
+
+The version comes from running `cloudflared version`, not from the folder name.
+Connectors from before `--no-autoupdate` replaced themselves in place, so the
+managed folder can hold another release. Binaries outside the managed folder only
+need `CLOUDFLARED_MIN_VERSION`, the oldest release that accepts every flag the
+connector is started with. Raise it whenever a new flag is added.
+
 ## OAuth traps
 
 Interactive clients and the headless CLI use the same Clerk application but

@@ -55,6 +55,7 @@ export class CloudManagedEndpointRuntime extends Context.Service<
 
 interface ActiveConnector {
   readonly child: ChildProcessSpawner.ChildProcessHandle;
+  readonly executable: RelayClient.AvailableRelayClient;
   readonly scope: Scope.Closeable;
   readonly configKey: string;
   readonly config: RelayManagedEndpointRuntimeConfig;
@@ -77,6 +78,10 @@ const TUNNEL_AUTHORIZATION_FAILURES_BEFORE_RECOVERY = 4;
 // Ask for recovery after this long, and again at this interval while it stays
 // unconnected; the relay hands back the same tunnel when it is still live.
 const CONNECTOR_REGISTRATION_TIMEOUT = Duration.minutes(3);
+// A failed background install of the pinned relay client is retried no sooner
+// than this, so a crash-looping connector or an offline host does not redownload
+// on every reconcile.
+const RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS = 10 * 60_000;
 
 export function classifyRelayClientOutput(line: string): "connected" | "warning" | "debug" {
   if (/\bRegistered tunnel connection\b/iu.test(line)) {
@@ -148,6 +153,10 @@ export const make = Effect.gen(function* () {
   const reconcileSemaphore = yield* Semaphore.make(1);
   const restartDelayRef = yield* Ref.make(0);
   const linkStateSemaphore = yield* Semaphore.make(1);
+  const runtimeScope = yield* Effect.scope;
+  const installInFlightRef = yield* Ref.make(false);
+  const lastInstallFailureAtRef = yield* Ref.make<number | null>(null);
+  const prunedRef = yield* Ref.make(false);
   let reconcileConfig: CloudManagedEndpointRuntime["Service"]["applyConfig"];
 
   const stopActive = Effect.gen(function* () {
@@ -228,6 +237,54 @@ export const make = Effect.gen(function* () {
       Effect.catchCause((cause) => Effect.logWarning("Relay client supervisor failed", { cause })),
     );
 
+  // Installs the pinned relay client in the background, then restarts the
+  // connector on it. The running connector, if any, keeps serving until the new
+  // binary is installed and validated, so an update costs one brief reconnect.
+  const ensurePinnedRelayClient = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const lastFailureAt = yield* Ref.get(lastInstallFailureAtRef);
+    if (lastFailureAt !== null && now - lastFailureAt < RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS) {
+      return;
+    }
+    if (yield* Ref.getAndSet(installInFlightRef, true)) return;
+    yield* Effect.logInfo("Installing the pinned relay client", {
+      version: RelayClient.CLOUDFLARED_VERSION,
+    });
+    yield* relayClient.install.pipe(
+      Effect.tap(() => Ref.set(lastInstallFailureAtRef, null)),
+      Effect.flatMap((installed) =>
+        reconcileSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const desiredConfig = yield* Ref.get(desiredConfigRef);
+            if (!desiredConfig || desiredConfig.providerKind !== "cloudflare_tunnel") return;
+            const active = yield* Ref.get(activeRef);
+            if (active?.executable.executablePath === installed.executablePath) return;
+            yield* Effect.logInfo("Relay client installed; restarting the connector on it", {
+              version: installed.version,
+              previousVersion: active?.executable.version,
+            });
+            yield* stopActive;
+            yield* reconcileConfig(desiredConfig);
+          }),
+        ),
+      ),
+      Effect.catchTags({
+        RelayClientInstallError: (error) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap((failedAt) => Ref.set(lastInstallFailureAtRef, failedAt)),
+            Effect.andThen(
+              Effect.logWarning("Could not install the pinned relay client", {
+                reason: error.reason,
+                message: error.message,
+                cause: error.cause,
+              }),
+            ),
+          ),
+      }),
+      Effect.ensuring(Ref.set(installInFlightRef, false)),
+    );
+  }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
+
   // Requests recovery while the connector has not registered a connection,
   // once per timeout, until it connects or is replaced.
   const watchConnectorRegistration = (connector: ActiveConnector) =>
@@ -270,6 +327,15 @@ export const make = Effect.gen(function* () {
                 Effect.logInfo("Relay client tunnel connection registered", attributes),
               ),
               Effect.andThen(Queue.offer(tunnelConnections, undefined)),
+              Effect.andThen(
+                RelayClient.isPinnedManagedRelayClient(connector.executable)
+                  ? Ref.getAndSet(prunedRef, true).pipe(
+                      Effect.flatMap((pruned) =>
+                        pruned ? Effect.void : relayClient.pruneManagedVersions,
+                      ),
+                    )
+                  : Effect.void,
+              ),
               Effect.asVoid,
             );
           case "warning":
@@ -328,6 +394,17 @@ export const make = Effect.gen(function* () {
     yield* stopActive;
 
     const executable = yield* relayClient.resolve;
+    // A linked host converges on the pinned managed release: install it when it
+    // is missing, and when only an older managed release or a PATH binary is
+    // available. An explicit override is the user's choice and is left alone.
+    if (
+      executable.status === "missing" ||
+      (executable.status === "available" &&
+        executable.source !== "override" &&
+        !RelayClient.isPinnedManagedRelayClient(executable))
+    ) {
+      yield* ensurePinnedRelayClient;
+    }
     if (executable.status !== "available") {
       return {
         status: "failed",
@@ -365,6 +442,8 @@ export const make = Effect.gen(function* () {
         Effect.tap((child) =>
           Effect.logInfo("Relay client process started; waiting for tunnel connection", {
             pid: Number(child.pid),
+            source: executable.source,
+            version: executable.version,
             tunnelId: config.tunnelId,
             tunnelName: config.tunnelName,
           }),
@@ -395,6 +474,7 @@ export const make = Effect.gen(function* () {
     if (!("status" in child)) {
       const connector = {
         child,
+        executable,
         scope: connectorScope,
         configKey: nextConfigKey,
         config,
