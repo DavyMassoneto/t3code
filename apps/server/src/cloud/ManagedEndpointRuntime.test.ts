@@ -1218,4 +1218,67 @@ describe("CloudManagedEndpointRuntime", () => {
       expect(yield* Queue.take(spawned)).toBe(RelayClient.CLOUDFLARED_VERSION);
     }),
   );
+
+  it.effect("retries a failed install when no relay client is installed", () =>
+    Effect.gen(function* () {
+      const pinnedClient = {
+        status: "available",
+        executablePath: "/managed/pinned/cloudflared",
+        source: "managed",
+        version: RelayClient.CLOUDFLARED_VERSION,
+      } as const;
+      let installed = false;
+      let installAttempts = 0;
+      const spawned = yield* Deferred.make<string>();
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(
+            spawned,
+            ChildProcess.isStandardCommand(command) ? command.command : "",
+          );
+          const handle = makeHandle({ pid: 9, onKill: () => {} });
+          yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+          return handle;
+        }),
+      );
+      const runtime = yield* buildCloudManagedEndpointRuntime(
+        spawner,
+        Layer.succeed(
+          RelayClient.RelayClient,
+          RelayClient.RelayClient.of({
+            resolve: Effect.sync(() =>
+              installed
+                ? pinnedClient
+                : { status: "missing" as const, version: RelayClient.CLOUDFLARED_VERSION },
+            ),
+            install: Effect.suspend(() => {
+              installAttempts += 1;
+              if (installAttempts === 1) {
+                return Effect.fail(
+                  new RelayClient.RelayClientInstallError({
+                    reason: "download_failed",
+                    message: "offline",
+                  }),
+                );
+              }
+              installed = true;
+              return Effect.succeed(pinnedClient);
+            }),
+            installWithProgress: () => Effect.die("unused"),
+            pruneManagedVersions: Effect.void,
+          }),
+        ),
+      );
+
+      expect(
+        yield* runtime.applyConfig({ providerKind: "cloudflare_tunnel", connectorToken: "token" }),
+      ).toMatchObject({ status: "failed", failure: "not-installed" });
+      yield* Effect.yieldNow;
+      expect(installAttempts).toBe(1);
+
+      yield* TestClock.adjust(Duration.minutes(10));
+      expect(yield* Deferred.await(spawned)).toBe(pinnedClient.executablePath);
+      expect(installAttempts).toBe(2);
+    }),
+  );
 });

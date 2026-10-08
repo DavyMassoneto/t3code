@@ -171,6 +171,7 @@ export const make = Effect.gen(function* () {
   const installInFlightRef = yield* Ref.make(false);
   const lastInstallFailureAtRef = yield* Ref.make<number | null>(null);
   const prunedRef = yield* Ref.make(false);
+  const retryLoopRunningRef = yield* Ref.make(false);
   let reconcileConfig: CloudManagedEndpointRuntime["Service"]["applyConfig"];
 
   const stopActive = Effect.gen(function* () {
@@ -328,14 +329,24 @@ export const make = Effect.gen(function* () {
     yield* installPinnedRelayClient;
   }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
 
-  // A connector running on an older managed release keeps retrying the install,
-  // since applyConfig returns early while that connector is healthy. The loop
-  // paces itself, so it skips the failure gate above.
-  const retryPinnedRelayClientInstall = installPinnedRelayClient.pipe(
-    Effect.forkIn(runtimeScope),
-    Effect.delay(Duration.millis(RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS)),
-    Effect.forever,
-  );
+  // Until the host runs the pinned release, retry the install every interval.
+  // applyConfig returns early while an older connector is healthy, and some
+  // activations never retry a missing client, so one runtime loop covers both.
+  // It paces itself, so it skips the failure gate above.
+  const retryPinnedRelayClientInstall = Effect.gen(function* () {
+    while (true) {
+      yield* Effect.sleep(Duration.millis(RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS));
+      const desiredConfig = yield* Ref.get(desiredConfigRef);
+      if (!desiredConfig || desiredConfig.providerKind !== "cloudflare_tunnel") return;
+      if (!needsPinnedRelayClient(yield* relayClient.resolve)) return;
+      yield* installPinnedRelayClient;
+    }
+  }).pipe(Effect.ensuring(Ref.set(retryLoopRunningRef, false)));
+
+  const startPinnedRelayClientRetries = Effect.gen(function* () {
+    if (yield* Ref.getAndSet(retryLoopRunningRef, true)) return;
+    yield* Effect.forkIn(retryPinnedRelayClientInstall, runtimeScope);
+  });
 
   // Requests recovery while the connector has not registered a connection,
   // once per timeout, until it connects or is replaced.
@@ -448,6 +459,7 @@ export const make = Effect.gen(function* () {
     const executable = yield* relayClient.resolve;
     if (needsPinnedRelayClient(executable)) {
       yield* ensurePinnedRelayClient;
+      yield* startPinnedRelayClientRetries;
     }
     if (executable.status !== "available") {
       return {
@@ -529,9 +541,6 @@ export const make = Effect.gen(function* () {
       yield* Effect.forkIn(observeConnectorOutput(connector), connectorScope);
       yield* Effect.forkIn(superviseConnector(connector), connectorScope);
       yield* Effect.forkIn(watchConnectorRegistration(connector), connectorScope);
-      if (needsPinnedRelayClient(executable)) {
-        yield* Effect.forkIn(retryPinnedRelayClientInstall, connectorScope);
-      }
       return {
         status: "running",
         providerKind: "cloudflare_tunnel",
