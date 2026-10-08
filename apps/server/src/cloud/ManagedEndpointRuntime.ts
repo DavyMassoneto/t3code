@@ -83,6 +83,20 @@ const CONNECTOR_REGISTRATION_TIMEOUT = Duration.minutes(3);
 // on every reconcile.
 const RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS = 10 * 60_000;
 
+/**
+ * A linked host converges on the pinned managed release when it has no relay
+ * client or runs another managed release. A PATH binary or an explicit override
+ * is the user's choice, and the CLI asks before downloading, so both stay put.
+ */
+function needsPinnedRelayClient(executable: RelayClient.RelayClientStatus): boolean {
+  return (
+    executable.status === "missing" ||
+    (executable.status === "available" &&
+      executable.source === "managed" &&
+      !RelayClient.isPinnedManagedRelayClient(executable))
+  );
+}
+
 export function classifyRelayClientOutput(line: string): "connected" | "warning" | "debug" {
   if (/\bRegistered tunnel connection\b/iu.test(line)) {
     return "connected";
@@ -240,12 +254,7 @@ export const make = Effect.gen(function* () {
   // Installs the pinned relay client in the background, then restarts the
   // connector on it. The running connector, if any, keeps serving until the new
   // binary is installed and validated, so an update costs one brief reconnect.
-  const ensurePinnedRelayClient = Effect.gen(function* () {
-    const now = yield* Clock.currentTimeMillis;
-    const lastFailureAt = yield* Ref.get(lastInstallFailureAtRef);
-    if (lastFailureAt !== null && now - lastFailureAt < RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS) {
-      return;
-    }
+  const installPinnedRelayClient = Effect.gen(function* () {
     if (yield* Ref.getAndSet(installInFlightRef, true)) return;
     yield* Effect.logInfo("Installing the pinned relay client", {
       version: RelayClient.CLOUDFLARED_VERSION,
@@ -263,6 +272,16 @@ export const make = Effect.gen(function* () {
             if (
               active?.executable.executablePath === installed.executablePath &&
               active.executable.version === installed.version
+            ) {
+              return;
+            }
+            // A fresh binary can fail its probe while a scanner holds it; restarting
+            // then would land on the same older binary, so leave it to the retry.
+            const resolved = yield* relayClient.resolve;
+            if (
+              resolved.status !== "available" ||
+              resolved.executablePath !== installed.executablePath ||
+              resolved.version !== installed.version
             ) {
               return;
             }
@@ -296,12 +315,24 @@ export const make = Effect.gen(function* () {
       }),
       Effect.ensuring(Ref.set(installInFlightRef, false)),
     );
+  });
+
+  // Reconciles call this; a recent failure skips the attempt so a crash-looping
+  // connector or an offline host does not redownload on every restart.
+  const ensurePinnedRelayClient = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const lastFailureAt = yield* Ref.get(lastInstallFailureAtRef);
+    if (lastFailureAt !== null && now - lastFailureAt < RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS) {
+      return;
+    }
+    yield* installPinnedRelayClient;
   }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
 
-  // A connector running on anything but the pinned release keeps retrying the
-  // install, since applyConfig returns early while that connector is healthy.
-  // The retry interval inside ensurePinnedRelayClient spaces the attempts out.
-  const retryPinnedRelayClientInstall = ensurePinnedRelayClient.pipe(
+  // A connector running on an older managed release keeps retrying the install,
+  // since applyConfig returns early while that connector is healthy. The loop
+  // paces itself, so it skips the failure gate above.
+  const retryPinnedRelayClientInstall = installPinnedRelayClient.pipe(
+    Effect.forkIn(runtimeScope),
     Effect.delay(Duration.millis(RELAY_CLIENT_INSTALL_RETRY_INTERVAL_MS)),
     Effect.forever,
   );
@@ -415,15 +446,7 @@ export const make = Effect.gen(function* () {
     yield* stopActive;
 
     const executable = yield* relayClient.resolve;
-    // A linked host converges on the pinned managed release: install it when it
-    // is missing, and when only an older managed release or a PATH binary is
-    // available. An explicit override is the user's choice and is left alone.
-    if (
-      executable.status === "missing" ||
-      (executable.status === "available" &&
-        executable.source !== "override" &&
-        !RelayClient.isPinnedManagedRelayClient(executable))
-    ) {
+    if (needsPinnedRelayClient(executable)) {
       yield* ensurePinnedRelayClient;
     }
     if (executable.status !== "available") {
@@ -506,7 +529,7 @@ export const make = Effect.gen(function* () {
       yield* Effect.forkIn(observeConnectorOutput(connector), connectorScope);
       yield* Effect.forkIn(superviseConnector(connector), connectorScope);
       yield* Effect.forkIn(watchConnectorRegistration(connector), connectorScope);
-      if (executable.source !== "override" && !RelayClient.isPinnedManagedRelayClient(executable)) {
+      if (needsPinnedRelayClient(executable)) {
         yield* Effect.forkIn(retryPinnedRelayClientInstall, connectorScope);
       }
       return {

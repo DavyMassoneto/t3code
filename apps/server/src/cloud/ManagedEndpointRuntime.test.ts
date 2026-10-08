@@ -979,6 +979,41 @@ describe("CloudManagedEndpointRuntime", () => {
     }),
   );
 
+  it.effect("leaves a PATH relay client alone", () =>
+    Effect.gen(function* () {
+      const install = vi.fn(() => Effect.die("unexpected install"));
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.gen(function* () {
+          const handle = makeHandle({ pid: 8, onKill: () => {} });
+          yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+          return handle;
+        }),
+      );
+      const runtime = yield* buildCloudManagedEndpointRuntime(
+        spawner,
+        Layer.succeed(
+          RelayClient.RelayClient,
+          RelayClient.RelayClient.of({
+            resolve: Effect.succeed({
+              status: "available",
+              executablePath: "/opt/homebrew/bin/cloudflared",
+              source: "path",
+              version: "2026.10.0",
+            }),
+            install: Effect.suspend(install),
+            installWithProgress: () => Effect.die("unused"),
+            pruneManagedVersions: Effect.void,
+          }),
+        ),
+      );
+      expect(
+        yield* runtime.applyConfig({ providerKind: "cloudflare_tunnel", connectorToken: "token" }),
+      ).toMatchObject({ status: "running", pid: 8 });
+      yield* TestClock.adjust(Duration.minutes(30));
+      expect(install).not.toHaveBeenCalled();
+    }),
+  );
+
   it.effect("leaves an override relay client alone", () =>
     Effect.gen(function* () {
       const install = vi.fn(() => Effect.die("unexpected install"));
@@ -1051,11 +1086,16 @@ describe("CloudManagedEndpointRuntime", () => {
             install: Effect.suspend(() => {
               installAttempts += 1;
               if (installAttempts === 1) {
-                return Effect.fail(
-                  new RelayClient.RelayClientInstallError({
-                    reason: "download_failed",
-                    message: "offline",
-                  }),
+                // A real download fails some time after it starts.
+                return Effect.sleep(Duration.seconds(30)).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      new RelayClient.RelayClientInstallError({
+                        reason: "download_failed",
+                        message: "offline",
+                      }),
+                    ),
+                  ),
                 );
               }
               installed = true;
@@ -1069,7 +1109,7 @@ describe("CloudManagedEndpointRuntime", () => {
 
       yield* runtime.applyConfig({ providerKind: "cloudflare_tunnel", connectorToken: "token" });
       expect(yield* Queue.take(spawned)).toBe(olderClient.executablePath);
-      yield* Effect.yieldNow;
+      yield* TestClock.adjust(Duration.seconds(30));
       expect(installAttempts).toBe(1);
 
       yield* TestClock.adjust(Duration.minutes(10));

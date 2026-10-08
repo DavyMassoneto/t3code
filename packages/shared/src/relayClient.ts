@@ -150,7 +150,7 @@ export interface RelayClientShape {
   readonly installWithProgress: (
     report: (event: RelayClientInstallProgressEvent) => Effect.Effect<void>,
   ) => Effect.Effect<AvailableRelayClient, RelayClientInstallError>;
-  /** Removes managed releases older than the pin. Call once the pinned release has connected. */
+  /** Removes managed releases older than the pin, except the newest one. Call once the pin has connected. */
   readonly pruneManagedVersions: Effect.Effect<void>;
 }
 
@@ -361,7 +361,12 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
     const config = yield* loadCloudflaredConfig;
     if (Option.isSome(config.executableOverride)) {
       const override = yield* compatibleCandidate(config.executableOverride.value, "override");
-      return override ?? missingStatus;
+      if (override) return override;
+      yield* Effect.logWarning(
+        `${CLOUDFLARED_PATH_ENV_NAME} must point to cloudflared ${CLOUDFLARED_MIN_VERSION} or newer`,
+        { executablePath: config.executableOverride.value },
+      );
+      return missingStatus;
     }
     // A managed binary reports the version it actually runs. One that replaced
     // itself in place still serves as a fallback; the runtime sees it is not the
@@ -378,7 +383,9 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
   }).pipe(Effect.withSpan("cloudflared.resolve"));
 
   const pruneManagedVersions: RelayClientShape["pruneManagedVersions"] = Effect.gen(function* () {
-    for (const version of yield* olderManagedVersions) {
+    // The newest older release stays: an older server sharing this base dir, or a
+    // rollback after a failed update, may still need it and cannot redownload it.
+    for (const version of (yield* olderManagedVersions).slice(1)) {
       // A connector from another server sharing this base dir may still run an
       // older release; Windows refuses to delete it, so the next prune retries.
       yield* fileSystem.remove(path.join(managedRoot, version), { recursive: true }).pipe(
