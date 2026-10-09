@@ -37,6 +37,7 @@ describe("Pi package storage locks", () => {
         yield* fs.makeDirectory(cwd);
         yield* fs.makeDirectory(path.dirname(managerPath), { recursive: true });
         yield* fs.writeFileString(managerPath, "fixture");
+        const canonicalManagerPath = yield* fs.realPath(managerPath);
         yield* fs.writeFileString(binary, "fixture");
         yield* fs.writeFileString(
           path.join(root, "package.json"),
@@ -63,8 +64,8 @@ describe("Pi package storage locks", () => {
           ...fs,
           realPath: (filename: string) =>
             fs.realPath(filename).pipe(
-              Effect.tap(() => {
-                if (filename !== managerPath) return Effect.void;
+              Effect.tap((resolvedPath) => {
+                if (resolvedPath !== canonicalManagerPath) return Effect.void;
                 sdkResolutions += 1;
                 return sdkResolutions === 2
                   ? Deferred.succeed(secondResolved, undefined)

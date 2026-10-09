@@ -371,6 +371,7 @@ describe("PiPackages", () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-packages-test-" });
+        const canonicalRoot = yield* fs.realPath(root);
         const runtimeCli = path.join(root, "cli.js");
         const binary = launcher === "direct" ? runtimeCli : path.join(root, ".shim", "pi.exe");
         const agentDir = path.join(root, "instance-agent");
@@ -540,7 +541,7 @@ describe("PiPackages", () => {
           expect(JSON.parse(launch.args.at(-1) ?? "")).toMatchObject({
             agentDir,
             scope: "global",
-            sdkRoot: root,
+            sdkRoot: canonicalRoot,
             cwd: root,
           });
         }
