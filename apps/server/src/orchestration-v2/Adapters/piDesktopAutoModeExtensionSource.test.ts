@@ -231,7 +231,6 @@ describe("Pi Desktop Auto Mode layered decisions", () => {
     NodeFS.writeFileSync(NodePath.join(extension.cwd, ".env"), "secret");
     NodeFS.writeFileSync(NodePath.join(extension.cwd, "src", "credentials.json"), "secret");
     NodeFS.writeFileSync(NodePath.join(extension.cwd, "src", "Capture d’écran.txt"), "variant");
-    NodeFS.writeFileSync(NodePath.join(extension.cwd, "src", "cafe\u0301.txt"), "variant");
     const paths = [
       "../outside/other.txt",
       "@../outside/other.txt",
@@ -240,7 +239,6 @@ describe("Pi Desktop Auto Mode layered decisions", () => {
       NodeURL.pathToFileURL(NodePath.join(extension.root, "outside", "other.txt")).href,
       "src/missing.txt",
       "src/Capture d'écran.txt",
-      "src/caf\u00e9.txt",
       "src/safe\u00a0.txt",
       ".env",
       "src/credentials.json",
@@ -263,6 +261,45 @@ describe("Pi Desktop Auto Mode layered decisions", () => {
       toolName: "write",
       input: { path: "src/.env/new.txt", content: "new" },
     });
+    assert.equal(extension.reviews.length, previous + 1);
+  });
+
+  it("distinguishes filesystem-equivalent Unicode files from missing exact read targets", async () => {
+    const extension = nativeExtension();
+    const decomposedPath = "src/cafe\u0301.txt";
+    const composedPath = "src/caf\u00e9.txt";
+    const decomposedTarget = NodePath.join(extension.cwd, decomposedPath);
+    const composedTarget = NodePath.join(extension.cwd, composedPath);
+    NodeFS.writeFileSync(decomposedTarget, "variant");
+    await extension.policy("activate unicode-paths");
+    assert.deepEqual(
+      await extension.emit("tool_call", { toolName: "read", input: { path: decomposedPath } }),
+      [undefined],
+    );
+    assert.equal(extension.reviews.length, 0);
+
+    const exactTargetExists = NodeFS.existsSync(composedTarget);
+    if (exactTargetExists) {
+      const composedStat = NodeFS.statSync(composedTarget);
+      const decomposedStat = NodeFS.statSync(decomposedTarget);
+      assert.equal(composedStat.dev, decomposedStat.dev);
+      assert.equal(composedStat.ino, decomposedStat.ino);
+      assert.equal(
+        NodePath.dirname(NodeFS.realpathSync(composedTarget)),
+        NodeFS.realpathSync(NodePath.join(extension.cwd, "src")),
+      );
+    }
+    assert.deepEqual(
+      await extension.emit("tool_call", { toolName: "read", input: { path: composedPath } }),
+      [undefined],
+    );
+    assert.equal(extension.reviews.length, exactTargetExists ? 0 : 1);
+
+    const missingPath = "src/guaranteed-missing-caf\u00e9.txt";
+    assert.isFalse(NodeFS.existsSync(NodePath.join(extension.cwd, missingPath)));
+    assert.isFalse(NodeFS.existsSync(NodePath.join(extension.cwd, missingPath.normalize("NFD"))));
+    const previous = extension.reviews.length;
+    await extension.emit("tool_call", { toolName: "read", input: { path: missingPath } });
     assert.equal(extension.reviews.length, previous + 1);
   });
 

@@ -6,11 +6,17 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { HostProcessExecutablePath, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import {
+  resolveKnownWindowsCliDirs,
+  resolveSpawnCommand,
+  SpawnExecutableResolution,
+} from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 
 import { PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE } from "../src/orchestration-v2/Adapters/piDesktopAutoModeExtensionSource.ts";
+import { resolveNativePiSdkRoot } from "../src/provider/nativePiSdkRoot.ts";
 
 type RecordValue = Record<string, unknown>;
 type Step = {
@@ -101,6 +107,70 @@ export function isolatedEnvironment(workspace: string, agentDirectory: string): 
     PI_OFFLINE: "1",
     PI_TELEMETRY: "0",
   };
+}
+
+function launcherResolutionEnvironment(
+  host: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): NodeJS.ProcessEnv {
+  const prefix = host.NPM_CONFIG_PREFIX || host.npm_config_prefix;
+  const packageDirectories = [
+    ...(prefix ? [platform === "win32" ? prefix : NodePath.join(prefix, "bin")] : []),
+    ...(platform === "win32"
+      ? resolveKnownWindowsCliDirs({
+          APPDATA: host.APPDATA,
+          LOCALAPPDATA: host.LOCALAPPDATA,
+          USERPROFILE: host.USERPROFILE,
+        })
+      : []),
+  ];
+  return {
+    PATH: [host.PATH || host.Path || "", ...packageDirectories]
+      .filter(Boolean)
+      .join(platform === "win32" ? ";" : ":"),
+    ...(host.PATHEXT ? { PATHEXT: host.PATHEXT } : {}),
+  };
+}
+
+async function resolveSmokeLaunch(
+  command: string,
+  args: readonly string[],
+  host: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+) {
+  const environment = launcherResolutionEnvironment(host, platform);
+  const resolveExecutable = await Effect.runPromise(SpawnExecutableResolution);
+  const executable = resolveExecutable(command, platform, environment);
+  NodeAssert.ok(executable, `Pi executable not found: ${command}`);
+  const launch = await Effect.runPromise(
+    resolveSpawnCommand(executable, args, { env: environment }),
+  );
+  if (!launch.shell) return launch;
+  const sdkRoot = await Effect.runPromise(
+    resolveNativePiSdkRoot({ binaryPath: executable, environment }).pipe(
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+  NodeAssert.ok(
+    sdkRoot,
+    "Cannot bind the npm Pi launcher to a verified SDK; refusing an unowned shell child",
+  );
+  const manifest = record(
+    JSON.parse(await NodeFSP.readFile(NodePath.join(sdkRoot, "package.json"), "utf8")),
+  );
+  const bin = typeof manifest.bin === "string" ? manifest.bin : record(manifest.bin).pi;
+  NodeAssert.ok(typeof bin === "string");
+  const cli = await NodeFSP.realpath(NodePath.join(sdkRoot, bin));
+  const nodeExecutable = await Effect.runPromise(HostProcessExecutablePath);
+  const direct = await Effect.runPromise(
+    resolveSpawnCommand(nodeExecutable, [cli, ...args], { env: environment }),
+  );
+  NodeAssert.equal(
+    direct.shell,
+    false,
+    "The verified Pi SDK must run in a directly owned Node process",
+  );
+  return direct;
 }
 
 class NativeRpc {
@@ -200,6 +270,10 @@ class NativeRpc {
 
   async close() {
     this.stopping = true;
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      await bounded(this.closed, "owned Pi already exited");
+      return;
+    }
     this.child.stdin.end();
     this.child.kill();
     try {
@@ -209,6 +283,111 @@ class NativeRpc {
       await bounded(this.closed, "owned Pi forced exit");
     }
   }
+}
+
+async function verifyWindowsNpmLauncher(
+  workspace: string,
+  agentDirectory: string,
+  environment: NodeJS.ProcessEnv,
+  owned: NativeRpc[],
+) {
+  const hostAppdata = NodePath.join(workspace, "host npm profile & spaces");
+  const prefix = NodePath.join(hostAppdata, "npm");
+  const sdkRoot = NodePath.join(prefix, "node_modules", "@earendil-works", "pi-coding-agent");
+  const cliDirectory = NodePath.join(
+    prefix,
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+    "dist",
+  );
+  await NodeFSP.mkdir(cliDirectory, { recursive: true });
+  await NodeFSP.writeFile(
+    NodePath.join(prefix, "pi.cmd"),
+    [
+      "@ECHO off",
+      "SETLOCAL",
+      'SET "dp0=%~dp0"',
+      'IF EXIST "%dp0%node.exe" (',
+      '  SET "_prog=%dp0%node.exe"',
+      ") ELSE (",
+      '  SET "_prog=node"',
+      ")",
+      '"%_prog%" "%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js" %*',
+      "",
+    ].join("\r\n"),
+  );
+  await NodeFSP.writeFile(
+    NodePath.join(sdkRoot, "package.json"),
+    JSON.stringify({
+      name: "@earendil-works/pi-coding-agent",
+      version: "1.1.0",
+      bin: { pi: "dist/cli.js" },
+    }),
+  );
+  await NodeFSP.mkdir(NodePath.join(sdkRoot, "dist", "core"));
+  for (const name of ["auth-storage.js", "model-runtime.js"])
+    await NodeFSP.writeFile(NodePath.join(sdkRoot, "dist", "core", name), "");
+  await NodeFSP.writeFile(
+    NodePath.join(cliDirectory, "cli.js"),
+    `
+const readline = require("node:readline");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  process.stdout.write(JSON.stringify({ type: "response", id: request.id, command: request.type, success: true, data: { pid: process.pid, args: process.argv.slice(2), home: process.env.HOME, profile: process.env.USERPROFILE, appdata: process.env.APPDATA, agentDirectory: process.env.PI_CODING_AGENT_DIR, hostOnlyAbsent: process.env.SMOKE_HOST_ONLY === undefined, prefixAbsent: process.env.NPM_CONFIG_PREFIX === undefined && process.env.npm_config_prefix === undefined, apiKeyAbsent: process.env.OPENAI_API_KEY === undefined } }) + "\\n");
+});
+`,
+  );
+  const args = ["--owned-npm-probe", "argument with spaces & punctuation"];
+  const nodeExecutable = await Effect.runPromise(HostProcessExecutablePath);
+  const host = {
+    PATH: "",
+    PATHEXT: environment.PATHEXT || ".COM;.EXE;.BAT;.CMD",
+    SMOKE_HOST_ONLY: "owned synthetic value",
+  };
+  const hosts: NodeJS.ProcessEnv[] = [
+    { ...host, NPM_CONFIG_PREFIX: prefix },
+    { ...host, npm_config_prefix: prefix },
+    { ...host, APPDATA: hostAppdata },
+  ];
+  for (const lookup of hosts) {
+    const resolved = await resolveSmokeLaunch("pi", args, lookup, "win32");
+    NodeAssert.equal(resolved.shell, false);
+    NodeAssert.equal(resolved.command, nodeExecutable);
+    NodeAssert.deepEqual(resolved.args, [NodePath.join(cliDirectory, "cli.js"), ...args]);
+  }
+  const launch = await resolveSmokeLaunch(NodePath.join(prefix, "pi.cmd"), args, host, "win32");
+  const probe = new NativeRpc(
+    NodeChildProcess.spawn(launch.command, [...launch.args], {
+      cwd: workspace,
+      env: environment,
+      shell: launch.shell,
+      windowsHide: true,
+      stdio: "pipe",
+    }),
+  );
+  owned.push(probe);
+  try {
+    const result = record(await probe.request({ type: "get_state" }));
+    NodeAssert.equal(
+      result.pid,
+      probe.child.pid,
+      "The npm SDK must execute in the captured child, not a shell grandchild",
+    );
+    NodeAssert.deepEqual(result.args, args);
+    NodeAssert.equal(result.home, workspace);
+    NodeAssert.equal(result.profile, workspace);
+    NodeAssert.equal(result.appdata, environment.APPDATA);
+    NodeAssert.equal(result.agentDirectory, agentDirectory);
+    NodeAssert.equal(result.hostOnlyAbsent, true);
+    NodeAssert.equal(result.prefixAbsent, true);
+    NodeAssert.equal(result.apiKeyAbsent, true);
+  } finally {
+    await probe.close();
+  }
+  console.log(
+    "PASS owned npm pi.cmd: npm-prefix and APPDATA resolution, verified SDK entrypoint, isolated directly owned Node process",
+  );
 }
 
 function sendSse(response: NodeHttp.ServerResponse, delta: RecordValue, finishReason: string) {
@@ -254,6 +433,7 @@ export async function runAutoModeSmoke() {
   const taskDirectory = NodePath.join(workspace, "task");
   const agentDirectory = NodePath.join(workspace, "agent");
   let rpc: NativeRpc | undefined;
+  const owned: NativeRpc[] = [];
   let current: { scenario: Scenario; agentRequests: number; reviewRequests: number } | undefined;
   const requests: { scenario: string; kind: string }[] = [];
   let serverFailure: Error | undefined;
@@ -413,6 +593,10 @@ export async function runAutoModeSmoke() {
     await NodeFSP.mkdir(taskDirectory);
     for (const directory of ["tmp", "appdata", "localappdata", "config", "cache"])
       await NodeFSP.mkdir(NodePath.join(workspace, directory));
+    const platform = await Effect.runPromise(HostProcessPlatform);
+    const environment = isolatedEnvironment(workspace, agentDirectory);
+    if (platform === "win32")
+      await verifyWindowsNpmLauncher(workspace, agentDirectory, environment, owned);
     await NodeFSP.writeFile(NodePath.join(agentDirectory, "auth.json"), "{}\n");
     await NodeFSP.writeFile(NodePath.join(agentDirectory, "settings.json"), "{}\n");
     const extensionPath = NodePath.join(workspace, "auto-mode.mjs");
@@ -443,9 +627,7 @@ export async function runAutoModeSmoke() {
         },
       }),
     );
-    const environment = isolatedEnvironment(workspace, agentDirectory);
-    const platform = await Effect.runPromise(HostProcessPlatform);
-    const command = process.env.PI_BINARY_PATH || (platform === "win32" ? "pi.exe" : "pi");
+    const command = process.env.PI_BINARY_PATH || "pi";
     const args = [
       "--mode",
       "rpc",
@@ -466,14 +648,8 @@ export async function runAutoModeSmoke() {
       "--model",
       "fixture",
     ];
-    const launch = await Effect.runPromise(
-      resolveSpawnCommand(command, args, { env: environment }),
-    );
-    NodeAssert.equal(
-      launch.shell,
-      false,
-      "Use a native Pi executable for captured-process cleanup, not a shell wrapper",
-    );
+    const launch = await resolveSmokeLaunch(command, args, process.env, platform);
+    NodeAssert.equal(launch.shell, false, "Pi must run as a directly owned process");
     rpc = new NativeRpc(
       NodeChildProcess.spawn(launch.command, [...launch.args], {
         cwd: taskDirectory,
@@ -483,6 +659,7 @@ export async function runAutoModeSmoke() {
         stdio: "pipe",
       }),
     );
+    owned.push(rpc);
     const state = record(await rpc.request({ type: "get_state" }));
     NodeAssert.equal(record(state.model).provider, "test-provider");
     NodeAssert.equal(record(state.model).id, "fixture");
@@ -864,7 +1041,7 @@ export async function runAutoModeSmoke() {
     throw error;
   } finally {
     try {
-      await rpc?.close();
+      for (const process of owned) await process.close();
     } finally {
       try {
         if (server.listening) {
@@ -876,7 +1053,9 @@ export async function runAutoModeSmoke() {
         }
       } finally {
         NodeAssert.ok(
-          !rpc || rpc.child.exitCode !== null || rpc.child.signalCode !== null,
+          owned.every(
+            (process) => process.child.exitCode !== null || process.child.signalCode !== null,
+          ),
           "Refusing to remove workspace while owned Pi is running",
         );
         NodeAssert.equal(
