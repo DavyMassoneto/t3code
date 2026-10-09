@@ -17,7 +17,11 @@ import {
   getTriggerDisplayModelLabel,
   getTriggerDisplayModelName,
 } from "./providerIconUtils";
-import { shouldShowInstanceBadge, type ProviderInstanceEntry } from "../../providerInstances";
+import {
+  isLegacyPiDefaultModel,
+  shouldShowInstanceBadge,
+  type ProviderInstanceEntry,
+} from "../../providerInstances";
 import {
   ComposerControl,
   ComposerControlChevron,
@@ -25,6 +29,7 @@ import {
 } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
 import { shortcutLabelForCommand } from "../../keybindings";
+import { nativePiModelPresentation } from "./nativePiModelGroups";
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   /**
@@ -81,19 +86,31 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       model: props.model,
       options: selectedInstanceOptions,
     }) ??
-    (activeEntry?.driverKind === "opencode" || activeEntry?.driverKind === "antigravity"
+    (activeEntry?.driverKind === "opencode" ||
+    activeEntry?.driverKind === "antigravity" ||
+    activeEntry?.driverKind === "pi"
       ? undefined
       : selectedInstanceOptions[0]);
   const triggerTitle = selectedModel
     ? getTriggerDisplayModelName(selectedModel)
-    : props.model === ANTIGRAVITY_DEFAULT_MODEL
-      ? "Choose model"
-      : props.model || "Choose model";
+    : activeEntry?.driverKind === "pi" && (!props.model || isLegacyPiDefaultModel(props.model))
+      ? "Native default unavailable"
+      : props.model === ANTIGRAVITY_DEFAULT_MODEL
+        ? "Choose model"
+        : activeEntry?.driverKind === "pi" && props.model
+          ? `${props.model} (Unavailable)`
+          : props.model || "Choose model";
   const triggerLabel = selectedModel
     ? `${getTriggerDisplayModelLabel(selectedModel)}${selectedModel.isUnavailable ? " (Unavailable)" : ""}`
     : triggerTitle;
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
+  const activePresentation = activeEntry
+    ? nativePiModelPresentation(
+        activeEntry,
+        selectedModel ?? { slug: props.model, name: props.model },
+      )
+    : null;
 
   const setIsMenuOpen = (open: boolean) => {
     props.onOpenChange?.(open);
@@ -171,9 +188,19 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     return {
       ...selection,
       entry,
+      presentation: entry
+        ? nativePiModelPresentation(
+            entry,
+            model ?? { slug: selection.model, name: selection.model },
+          )
+        : null,
       label: model
         ? `${getTriggerDisplayModelName(model)}${model.isUnavailable ? " (Unavailable)" : ""}`
-        : selection.model,
+        : entry?.driverKind === "pi"
+          ? !selection.model || isLegacyPiDefaultModel(selection.model)
+            ? "Native default unavailable"
+            : `${selection.model} (Unavailable)`
+          : selection.model,
     };
   });
   const multipleLabel = selectedEntries
@@ -190,6 +217,10 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const triggerTooltipContent = shortcutLabel
     ? `${props.triggerLabel ?? allModelNames ?? triggerLabel} · ${shortcutLabel}`
     : (props.triggerLabel ?? allModelNames ?? triggerLabel);
+  const serviceTooltip =
+    activeEntry?.driverKind === "pi" && !selectedEntries && props.triggerLabel === undefined
+      ? `${triggerTooltipContent} · ${activePresentation?.label}`
+      : triggerTooltipContent;
 
   return (
     <Popover
@@ -230,7 +261,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                   selection.entry ? (
                     <ProviderInstanceIcon
                       key={`${selection.instanceId}:${selection.model}`}
-                      driverKind={selection.entry.driverKind}
+                      driverKind={
+                        selection.presentation?.iconDriverKind ?? selection.entry.driverKind
+                      }
                       displayName={selection.entry.displayName}
                       accentColor={selection.entry.accentColor}
                       className="size-4 rounded-full bg-(--chat-composer-glass-surface,var(--background)) ring-2 ring-(--chat-composer-glass-surface,var(--background))"
@@ -246,7 +279,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             </span>
           ) : activeEntry && props.triggerLabel === undefined ? (
             <ProviderInstanceIcon
-              driverKind={activeEntry.driverKind}
+              driverKind={activePresentation?.iconDriverKind ?? activeEntry.driverKind}
               displayName={activeEntry.displayName}
               accentColor={activeEntry.accentColor}
               acpRegistryAgentId={activeEntry.acpRegistryAgentId}
@@ -272,7 +305,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             >
               {props.triggerLabel ?? multipleLabel ?? triggerTitle}
             </TooltipTrigger>
-            <TooltipPopup side="top">{triggerTooltipContent}</TooltipPopup>
+            <TooltipPopup side="top">{serviceTooltip}</TooltipPopup>
           </Tooltip>
           {selectedModel?.isUnavailable && !selectedEntries && props.triggerLabel === undefined ? (
             <Badge variant="outline" size="sm">

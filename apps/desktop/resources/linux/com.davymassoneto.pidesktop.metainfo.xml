@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.davymassoneto.pidesktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Pi Desktop</name>
+  <summary>Independent desktop GUI for the Pi coding agent</summary>
+  <description><p>Pi Desktop is an independent fork of T3 Code for the Pi coding agent.</p></description>
+  <launchable type="desktop-id">pi-desktop.desktop</launchable>
+  <icon type="stock">pi-desktop</icon>
+  <provides><binary>pi-desktop</binary></provides>
+  <categories><category>Development</category></categories>
+  <url type="homepage">https://github.com/DavyMassoneto/t3code</url>
+  <url type="bugtracker">https://github.com/DavyMassoneto/t3code/issues</url>
+  <url type="vcs-browser">https://github.com/DavyMassoneto/t3code</url>
+</component>

@@ -65,8 +65,8 @@ const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
 
-const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
-const defaultCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({});
+const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({ enabled: true });
+const defaultCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({ enabled: true });
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const disabledCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({
   enabled: false,
@@ -457,7 +457,10 @@ it.layer(
     it.effect("passes configured launch args to the Codex provider probe", () =>
       Effect.gen(function* () {
         let observedLaunchArgs: string | undefined;
-        const settings = decodeCodexSettings({ launchArgs: "--strict-config --enable foo" });
+        const settings = decodeCodexSettings({
+          enabled: true,
+          launchArgs: "--strict-config --enable foo",
+        });
 
         const status = yield* checkCodexProviderStatus(settings, (input) => {
           observedLaunchArgs = input.launchArgs;
@@ -669,6 +672,25 @@ it.layer(
         { name: "replacement" },
       ]);
       assert.strictEqual(recovered.workspaceSnapshots?.[0]?.slashCommandsPending, undefined);
+      const policy = {
+        id: "project-auto",
+        label: "Project Auto",
+        extensionName: "project",
+        command: "pi-desktop-policy-project-auto",
+      };
+      const withPolicy = ProviderRegistry.upsertProviderWorkspaceSnapshot(
+        { ...provider, runtimePolicies: [policy] },
+        "/project",
+        { ...scopedSnapshot, runtimePolicies: [policy] },
+      );
+      assert.deepStrictEqual(withPolicy.workspaceSnapshots?.[0]?.runtimePolicies, [policy]);
+      const withoutPolicy = ProviderRegistry.upsertProviderWorkspaceSnapshot(
+        withPolicy,
+        "/project",
+        { ...scopedSnapshot, runtimePolicies: [] },
+      );
+      assert.deepStrictEqual(withoutPolicy.workspaceSnapshots?.[0]?.runtimePolicies, []);
+      assert.deepStrictEqual(withoutPolicy.runtimePolicies, [policy]);
     });
 
     it("preserves previously discovered provider models when a refresh returns none", () => {
@@ -2644,19 +2666,17 @@ it.layer(
     );
 
     // This test intentionally avoids `mockCommandSpawnerLayer` so the real
-    // `probeCodexAppServerProvider` path runs — including the full
-    // `codex app-server` RPC handshake via `CodexClient.layerChildProcess`.
+    // `checkPiProviderStatus` path runs, including the native version probe.
     // We point `binaryPath` at a name that cannot exist on any machine so
     // the real `ChildProcessSpawner` deterministically returns ENOENT; the
-    // probe wraps that as `CodexAppServerSpawnError` and
-    // `checkCodexProviderStatus` turns it into the user-visible "not
+    // `checkPiProviderStatus` turns it into the user-visible "not
     // installed" error snapshot. If the aggregator's `syncLiveSources`
-    // breaks — the `codex_personal`-never-probes bug we are guarding
+    // breaks — the custom-instance-never-probes bug we are guarding
     // against — that snapshot never lands in `getProviders` and the
     // assertions below fail.
-    it.effect("propagates real Codex probe failures to the aggregator at boot", () =>
+    it.effect("propagates real Pi probe failures to the aggregator at boot", () =>
       Effect.gen(function* () {
-        const missingBinary = `t3code_codex_missing_`;
+        const missingBinary = `t3code_pi_missing_`;
         const serverSettings = yield* makeMutableServerSettingsService(
           decodeServerSettings(
             deepMerge(encodedDefaultServerSettings, {
@@ -2671,6 +2691,7 @@ it.layer(
                 cursor: { enabled: false },
                 grok: { enabled: false },
                 opencode: { enabled: false },
+                pi: { enabled: false },
               },
               // `providerInstances` keys are branded `ProviderInstanceId`;
               // the branded index signature rejects plain string literals
@@ -2678,16 +2699,12 @@ it.layer(
               // accepts + decodes them. Cast the patch to `unknown` so
               // the `Schema.decodeSync` below does the real validation.
               providerInstances: {
-                // Matches the shape the user had in `.t3/dev/settings.json`
-                // when the bug was reported: a custom enabled Codex instance
-                // pointing at a binary the server has to actually spawn.
-                codex_personal: {
-                  driver: "codex",
-                  displayName: "Codex Personal",
+                pi_personal: {
+                  driver: "pi",
+                  displayName: "Pi Personal",
                   enabled: true,
                   config: {
                     binaryPath: missingBinary,
-                    homePath: `/tmp/${missingBinary}_home`,
                   },
                 },
               } as unknown as ContractServerSettings["providerInstances"],
@@ -2733,44 +2750,47 @@ it.layer(
 
         yield* Effect.gen(function* () {
           const registry = yield* ProviderRegistry.ProviderRegistry;
-          let providers = yield* registry.getProviders;
-          for (
-            let attempts = 0;
-            attempts < 50 &&
-            providers.find((provider) => provider.instanceId === "codex_personal")?.status !==
-              "error";
-            attempts += 1
-          ) {
-            yield* Effect.yieldNow;
-            providers = yield* registry.getProviders;
-          }
-          const codexPersonal = providers.find(
-            (provider) => provider.instanceId === "codex_personal",
+          const failedProbe = yield* Stream.toPull(
+            registry.streamChanges.pipe(
+              Stream.filter((providers) =>
+                providers.some(
+                  (provider) =>
+                    provider.instanceId === "pi_personal" && provider.status === "error",
+                ),
+              ),
+            ),
           );
+          const currentProviders = yield* registry.getProviders;
+          const providers = currentProviders.some(
+            (provider) => provider.instanceId === "pi_personal" && provider.status === "error",
+          )
+            ? currentProviders
+            : (yield* failedProbe)[0]!;
+          const piPersonal = providers.find((provider) => provider.instanceId === "pi_personal");
           assert.notStrictEqual(
-            codexPersonal,
+            piPersonal,
             undefined,
-            `Expected the aggregator to know about codex_personal; instead saw: ${providers
+            `Expected the aggregator to know about pi_personal; instead saw: ${providers
               .map((provider) => provider.instanceId)
               .join(", ")}`,
           );
           assert.strictEqual(
-            codexPersonal?.status,
+            piPersonal?.status,
             "error",
-            "Real Codex probe against a missing binary should surface as 'error' in the aggregator",
+            "Real Pi probe against a missing binary should surface as 'error' in the aggregator",
           );
-          assert.strictEqual(codexPersonal?.installed, false);
-          assert.include(codexPersonal?.message, missingBinary);
-          assert.include(codexPersonal?.message, "Settings → Providers → Codex → Binary path");
+          assert.strictEqual(piPersonal?.installed, false);
+          assert.include(piPersonal?.message, "Pi CLI (`pi`) is not installed or not on PATH");
+          assert.include(piPersonal?.message, "npm install -g @earendil-works/pi-coding-agent");
         }).pipe(Effect.provide(runtimeServices));
       }),
     );
 
-    // A binary path change must rebuild Codex and publish its new probe result.
-    it.effect("re-probes when settings change the codex binaryPath", () =>
+    // A binary path change must rebuild Pi and publish its new probe result.
+    it.effect("re-probes when settings change the Pi binaryPath", () =>
       Effect.gen(function* () {
-        const firstMissing = `t3code_codex_first_`;
-        const secondMissing = `t3code_codex_second_`;
+        const firstMissing = `t3code_pi_first_`;
+        const secondMissing = `t3code_pi_second_`;
         const spawnedCommands: Array<string> = [];
         const secondProbeStarted = yield* Deferred.make<void>();
         const releaseSecondProbe = yield* Deferred.make<void>();
@@ -2779,7 +2799,8 @@ it.layer(
           decodeServerSettings(
             deepMerge(encodedDefaultServerSettings, {
               providers: {
-                codex: { enabled: true, binaryPath: firstMissing },
+                pi: { enabled: true, binaryPath: firstMissing },
+                codex: { enabled: false },
                 claudeAgent: { enabled: false },
                 cursor: { enabled: false },
                 grok: { enabled: false },
@@ -2844,32 +2865,33 @@ it.layer(
 
         yield* Effect.gen(function* () {
           const registry = yield* ProviderRegistry.ProviderRegistry;
-          const codexSnapshots = registry.streamChanges.pipe(
-            Stream.map((providers) =>
-              providers.find((provider) => provider.instanceId === "codex"),
-            ),
+          const piSnapshots = registry.streamChanges.pipe(
+            Stream.map((providers) => providers.find((provider) => provider.instanceId === "pi")),
             Stream.filter((provider): provider is ServerProvider => provider !== undefined),
           );
           const firstError = yield* Stream.toPull(
-            codexSnapshots.pipe(Stream.filter((provider) => provider.status === "error")),
+            piSnapshots.pipe(Stream.filter((provider) => provider.status === "error")),
           );
-          const currentCodex = (yield* registry.getProviders).find(
-            (provider) => provider.instanceId === "codex",
+          const currentPi = (yield* registry.getProviders).find(
+            (provider) => provider.instanceId === "pi",
           );
-          const initialCodex =
-            currentCodex?.status === "error" ? currentCodex : (yield* firstError)[0];
-          assert.strictEqual(initialCodex?.status, "error");
-          assert.strictEqual(initialCodex?.installed, false);
+          const initialPi = currentPi?.status === "error" ? currentPi : (yield* firstError)[0];
+          assert.strictEqual(initialPi?.status, "error");
+          assert.strictEqual(initialPi?.installed, false);
           assert.deepStrictEqual(spawnedCommands, [firstMissing]);
 
           const pendingRebuild = yield* Stream.toPull(
-            codexSnapshots.pipe(
-              Stream.filter((provider) => provider.status === "warning" && !provider.installed),
+            piSnapshots.pipe(
+              Stream.filter(
+                (provider) =>
+                  provider.status === "warning" &&
+                  provider.message === "Checking Pi CLI availability...",
+              ),
             ),
           );
           yield* serverSettings.updateSettings({
             providers: {
-              codex: { enabled: true, binaryPath: secondMissing },
+              pi: { enabled: true, binaryPath: secondMissing },
             },
           });
           // Start the lazy stream only after publishing. A watcher that did
@@ -2881,13 +2903,13 @@ it.layer(
           yield* Deferred.await(secondProbeStarted);
           yield* pendingRebuild;
           const rebuiltError = yield* Stream.toPull(
-            codexSnapshots.pipe(Stream.filter((provider) => provider.status === "error")),
+            piSnapshots.pipe(Stream.filter((provider) => provider.status === "error")),
           );
           yield* Deferred.succeed(releaseSecondProbe, undefined);
-          const [reprobedCodex] = yield* rebuiltError;
+          const [reprobedPi] = yield* rebuiltError;
           assert.deepStrictEqual(spawnedCommands, [firstMissing, secondMissing]);
-          assert.strictEqual(reprobedCodex?.status, "error");
-          assert.strictEqual(reprobedCodex?.installed, false);
+          assert.strictEqual(reprobedPi?.status, "error");
+          assert.strictEqual(reprobedPi?.installed, false);
         }).pipe(Effect.provide(runtimeServices));
       }),
     );
@@ -2962,7 +2984,7 @@ it.layer(
     );
 
     it.effect(
-      "keeps Cursor disabled and skips provider probing when settings use their defaults",
+      "keeps removed providers out of the Pi-only registry and skips disabled Pi probing",
       () =>
         Effect.gen(function* () {
           const serverSettings = yield* makeMutableServerSettingsService(
@@ -2973,6 +2995,9 @@ it.layer(
                     enabled: false,
                   },
                   grok: {
+                    enabled: false,
+                  },
+                  pi: {
                     enabled: false,
                   },
                 },
@@ -3046,21 +3071,13 @@ it.layer(
             );
 
             assert.deepStrictEqual(providers.map((provider) => provider.instanceId).toSorted(), [
-              "antigravity",
-              "claudeAgent",
-              "codex",
-              "cursor",
-              "grok",
-              "muse",
-              "opencode",
               "pi",
             ]);
-            assert.strictEqual(cursorProvider?.enabled, false);
-            assert.strictEqual(cursorProvider?.status, "disabled");
-            assert.strictEqual(cursorProvider?.message, "Cursor is disabled in T3 Code settings.");
+            assert.isUndefined(cursorProvider);
+            assert.strictEqual(providers[0]?.enabled, false);
+            assert.strictEqual(providers[0]?.status, "disabled");
             const museProvider = providers.find((provider) => provider.driver === "muse");
-            assert.strictEqual(museProvider?.enabled, false);
-            assert.strictEqual(museProvider?.status, "disabled");
+            assert.isUndefined(museProvider);
             assert.strictEqual(cursorSpawned, false);
           }).pipe(Effect.provide(runtimeServices));
         }),

@@ -22,6 +22,20 @@ import {
 const PROVIDER: ProviderDriverKind = ProviderDriverKind.make("codex");
 const MODEL = "test-model";
 
+it("dispatches a selected Pi runtime policy even when the selected model has no capabilities", () => {
+  const state = getComposerProviderState({
+    provider: ProviderDriverKind.make("pi"),
+    model: MODEL,
+    models: [],
+    planModeEnabled: false,
+    modelOptions: [
+      { id: "piRuntimePolicy", value: "review" },
+      { id: "unknown", value: true },
+    ],
+  });
+  expect(state.modelOptionsForDispatch).toEqual([{ id: "piRuntimePolicy", value: "review" }]);
+});
+
 function selectDescriptor(
   id: string,
   options: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }>,

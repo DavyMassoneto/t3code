@@ -15,6 +15,9 @@ export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
+export const T3_PI_POLICY_TOKEN_ENV = "T3_PI_POLICY_TOKEN";
+export const PI_RUNTIME_POLICY_STATE_COMMAND = "t3-pi-runtime-policy-state";
+export const PI_RUNTIME_POLICY_GUARD_ACK_PREFIX = "PI_DESKTOP_POLICY_GUARD_ACK:";
 
 /**
  * Pi tools whose confirmations the bridge raises as file-change approvals.
@@ -29,6 +32,9 @@ import { Type } from "typebox";
 const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
+const POLICY_TOKEN_ENV = ${JSON.stringify(T3_PI_POLICY_TOKEN_ENV)};
+const STATE_COMMAND = ${JSON.stringify(PI_RUNTIME_POLICY_STATE_COMMAND)};
+const GUARD_ACK_PREFIX = ${JSON.stringify(PI_RUNTIME_POLICY_GUARD_ACK_PREFIX)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -236,12 +242,32 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // keep their normal meaning without replacing or shadowing Pi's runtime.
   // Only Pi's own search is known to be read-only. An extension that replaces
   // it keeps the name, and cannot discover deferred tools either.
+  let mode = runtimeMode();
+  let activePolicy: string | undefined;
+  pi.on("session_start", () => { activePolicy = undefined; });
+  pi.registerCommand(STATE_COMMAND, {
+    description: "Private Pi Desktop policy guard",
+    handler: async (args, ctx) => {
+      const [token, nextMode, policyId, requestId, extra] = args.trim().split(/\\s+/);
+      if (token !== env(POLICY_TOKEN_ENV) || token === undefined || extra !== undefined ||
+          requestId === undefined || policyId === undefined ||
+          !["approval-required", "auto-accept-edits", "auto", "full-access"].includes(nextMode)) return;
+      mode = nextMode as RuntimeMode;
+      activePolicy = mode === "auto" && policyId !== "-" ? policyId : undefined;
+      ctx.ui.notify(GUARD_ACK_PREFIX + JSON.stringify({ requestId, policyId,
+        action: policyId === "-" ? "deactivate" : "activate", success: true }), "info");
+    },
+  });
+
   const hasBuiltinToolSearch = () =>
     typeof pi.getAllTools === "function" &&
     pi.getAllTools().some((tool) => tool.name === "tool_search" && tool.sourceInfo?.path === "builtin:tool-search");
 
   pi.on("tool_call", async (event, ctx) => {
-    const mode = runtimeMode();
+    if (mode === "auto") {
+      if (activePolicy !== undefined) return;
+      return { block: true, reason: "Pi Desktop runtime policy has not been confirmed." };
+    }
     if (mode === "full-access") return;
     if (event.toolName === "tool_search" ? hasBuiltinToolSearch() : READ_ONLY_TOOLS.has(event.toolName)) {
       return;

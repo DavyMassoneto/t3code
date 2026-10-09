@@ -128,7 +128,16 @@ it("does not mistake installed files for KDE authorization, or fall back to a pi
 
 it("detects a bundled update, updates explicitly, and removes only capture's registration", async () => {
   await setup.perform("install-kde-helper");
-  const unrelated = NodePath.join(paths.dataHome, "applications", "another-app.desktop");
+  const unrelated = NodePath.join(
+    paths.dataHome,
+    "applications",
+    "com.t3tools.T3Code.KdeCapture.desktop",
+  );
+  const upstreamHelper = NodePath.join(paths.dataHome, "t3code/kde-capture/t3-kde-snap-shot");
+  await NodeFSP.mkdir(NodePath.dirname(upstreamHelper), { recursive: true });
+  await NodeFSP.writeFile(upstreamHelper, "upstream helper");
+  expect(kdeCapturePaths(paths).desktop).not.toBe(unrelated);
+  expect(kdeCapturePaths(paths).executable).not.toBe(upstreamHelper);
   await NodeFSP.writeFile(unrelated, "keep me");
   await NodeFSP.writeFile(paths.bundle, "updated helper");
   expect((await setup.state()).status).toBe("update-required");
@@ -137,6 +146,7 @@ it("detects a bundled update, updates explicitly, and removes only capture's reg
   await setup.perform("remove-kde-helper");
   expect((await setup.state()).status).toBe("not-installed");
   expect(await NodeFSP.readFile(unrelated, "utf8")).toBe("keep me");
+  expect(await NodeFSP.readFile(upstreamHelper, "utf8")).toBe("upstream helper");
 });
 
 it("repairs the old semicolon permission entry without replacing unrelated registrations", async () => {

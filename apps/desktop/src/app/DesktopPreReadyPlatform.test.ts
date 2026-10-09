@@ -50,8 +50,27 @@ vi.mock("node:fs", () => ({
 }));
 
 import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
+import * as DesktopConfig from "./DesktopConfig.ts";
 
 describe("DesktopPreReadyPlatform", () => {
+  it.effect("does not install a Linux URL entry when registration is suppressed", () =>
+    Effect.gen(function* () {
+      yield* DesktopPreReadyPlatform.DesktopPreReadyElectronOptions;
+      assert.equal(writeFileSyncMock.mock.calls.length, 0);
+      assert.equal(mkdirSyncMock.mock.calls.length, 0);
+      assert.equal(copyFileSyncMock.mock.calls.length, 0);
+      assert.equal(registerSchemesMock.mock.calls.length, 1);
+    }).pipe(
+      Effect.provide(
+        DesktopPreReadyPlatform.layer.pipe(
+          Layer.provide(Layer.succeed(HostProcessPlatform, "linux")),
+          Layer.provide(
+            DesktopConfig.layerTest({ T3CODE_DESKTOP_SUPPRESS_PROTOCOL_REGISTRATION: "true" }),
+          ),
+        ),
+      ),
+    ),
+  );
   beforeEach(() => {
     appendSwitchMock.mockReset();
     getSwitchValueMock.mockReset();
@@ -89,17 +108,17 @@ describe("DesktopPreReadyPlatform", () => {
     vi.stubEnv("XDG_DATA_HOME", "/xdg");
     vi.stubEnv("APPIMAGE", "/Applications/current.AppImage");
     getSwitchValueMock.mockReturnValue("");
-    let desktopName = "t3code.desktop";
+    let desktopName = "pi-desktop.desktop";
     let desktopEntry = previousEntry;
     let iconInstalled = false;
     copyFileSyncMock.mockImplementation((_source: string, destination: string) => {
-      iconInstalled = destination === "/xdg/icons/com.t3tools.T3Code.desktop.png";
+      iconInstalled = destination === "/xdg/icons/com.davymassoneto.pidesktop.desktop.png";
     });
     setDesktopNameMock.mockImplementation((name: string) => {
       desktopName = name;
     });
     writeFileSyncMock.mockImplementation((path: string, contents: string) => {
-      if (path === "/xdg/applications/com.t3tools.T3Code.desktop") desktopEntry = contents;
+      if (path === "/xdg/applications/com.davymassoneto.pidesktop.desktop") desktopEntry = contents;
     });
 
     return Effect.scoped(
@@ -115,13 +134,13 @@ describe("DesktopPreReadyPlatform", () => {
           ),
         );
         const identity = yield* Effect.promise(() => portalIdentity);
-        assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
+        assert.equal(identity.desktopName, "com.davymassoneto.pidesktop.desktop");
         assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
-        assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Alpha)");
-        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
+        assert.include(identity.desktopEntry ?? "", "Name=Pi Desktop");
+        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/pi-desktop;");
         assert.include(
           identity.desktopEntry ?? "",
-          "Icon=/xdg/icons/com.t3tools.T3Code.desktop.png",
+          "Icon=/xdg/icons/com.davymassoneto.pidesktop.desktop.png",
         );
         assert.isTrue(identity.iconInstalled);
       }),
@@ -148,7 +167,7 @@ describe("DesktopPreReadyPlatform", () => {
     return Effect.gen(function* () {
       yield* DesktopPreReadyPlatform.make;
       const contents = writeFileSyncMock.mock.calls[0]?.[1];
-      assert.include(contents, "MimeType=x-scheme-handler/t3code;");
+      assert.include(contents, "MimeType=x-scheme-handler/pi-desktop;");
       assert.include(contents, "Icon=");
       assert.equal(setDesktopNameMock.mock.calls.length, 1);
     }).pipe(Effect.provideService(HostProcessPlatform, "linux"));

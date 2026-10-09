@@ -118,7 +118,7 @@ describe("resolveProviderCatalogAvailability", () => {
 describe("isProviderInstancePickerVisible", () => {
   it("keeps enabled instances in the rail and removes disabled instances", () => {
     const [enabledEntry, disabledEntry] = deriveProviderInstanceEntries([
-      provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex" }),
+      provider({ provider: ProviderDriverKind.make("pi"), instanceId: "pi" }),
       provider({
         provider: ProviderDriverKind.make("claudeAgent"),
         instanceId: "claudeAgent",
@@ -492,14 +492,75 @@ describe("getDefaultProviderInstanceModel", () => {
 });
 
 describe("resolveDefaultProviderModelSelection", () => {
+  it.each(["default", "pi-default", " DEFAULT ", ""])(
+    "resolves stored marker %s to the native default, preserving options",
+    (marker) => {
+      const instanceId = ProviderInstanceId.make("pi_work");
+      const snapshot = provider({
+        provider: ProviderDriverKind.make("pi"),
+        instanceId,
+        models: [
+          model("default", false, true),
+          model("openai/first"),
+          model("plugin/native", true, true),
+        ],
+      });
+      const stored = { instanceId, model: marker, options: [{ id: "thinking", value: "high" }] };
+      expect(resolveDefaultProviderModelSelection([snapshot], stored)).toEqual({
+        ...stored,
+        model: "plugin/native",
+      });
+      expect(getDefaultProviderInstanceModel([snapshot], instanceId)).toBe("plugin/native");
+      expect(
+        resolveDefaultProviderModelSelection(
+          [{ ...snapshot, models: [model("openai/first")] }],
+          stored,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it("does not invent a Pi default from the first catalog row or a ghost marker", () => {
+    const snapshot = provider({
+      provider: ProviderDriverKind.make("pi"),
+      instanceId: "pi",
+      models: [model("default", false, true), model("anthropic/first")],
+    });
+    expect(getDefaultProviderInstanceModel([snapshot], snapshot.instanceId)).toBeUndefined();
+    expect(resolveDefaultProviderModelSelection([snapshot], null)).toBeNull();
+    const stored = { instanceId: snapshot.instanceId, model: "plugin/unavailable" };
+    expect(resolveDefaultProviderModelSelection([snapshot], stored)).toBe(stored);
+  });
+  it("ignores historical defaults and selects only a configured Pi catalog", () => {
+    const legacy = provider({
+      provider: ProviderDriverKind.make("codex"),
+      instanceId: "codex",
+      models: [model("old")],
+    });
+    const pi = provider({
+      provider: ProviderDriverKind.make("pi"),
+      instanceId: "pi_work",
+      models: [model("anthropic/current", false, true)],
+    });
+    const saved = { instanceId: legacy.instanceId, model: "old" };
+    expect(resolveDefaultProviderModelSelection([legacy, pi], saved)).toEqual({
+      instanceId: pi.instanceId,
+      model: "anthropic/current",
+    });
+    expect(resolveDefaultProviderModelSelection([legacy], saved)).toBeNull();
+    expect(saved).toEqual({ instanceId: "codex", model: "old" });
+    expect(deriveProviderInstanceEntries([legacy])[0]?.displayName).toBe("Codex");
+    expect(getDefaultProviderInstanceModel([{ ...pi, models: [] }], pi.instanceId)).toBeUndefined();
+  });
+
   it.each([
-    ["codex", "codex", "gpt-5.6"],
-    ["claudeAgent", "claudeAgent", "claude-fable-5"],
-    ["cursor", "cursor", "composer-2"],
+    ["pi", "pi", "gpt-5.6"],
+    ["pi_work", "pi_work", "claude-fable-5"],
+    ["pi_other", "pi_other", "composer-2"],
   ])("uses the only available %s instance", (driver, instanceId, modelSlug) => {
     const providers = [
       provider({
-        provider: ProviderDriverKind.make(driver),
+        provider: ProviderDriverKind.make("pi"),
         instanceId,
         models: [model(modelSlug, false, true)],
       }),
@@ -514,13 +575,13 @@ describe("resolveDefaultProviderModelSelection", () => {
   it("preserves a valid stored selection including its options", () => {
     const providers = [
       provider({
-        provider: ProviderDriverKind.make("claudeAgent"),
-        instanceId: "claudeAgent",
+        provider: ProviderDriverKind.make("pi"),
+        instanceId: "pi_work",
         models: [model("claude-opus-4-8")],
       }),
     ];
     const stored = {
-      instanceId: ProviderInstanceId.make("claudeAgent"),
+      instanceId: ProviderInstanceId.make("pi_work"),
       model: "custom-model",
       options: [{ id: "effort", value: "high" }],
     };
@@ -531,14 +592,14 @@ describe("resolveDefaultProviderModelSelection", () => {
   it("replaces a stale stored instance with the first ready instance and its model", () => {
     const providers = [
       provider({
-        provider: ProviderDriverKind.make("codex"),
-        instanceId: "codex",
+        provider: ProviderDriverKind.make("pi"),
+        instanceId: "pi",
         status: "warning",
         models: [model("gpt-5.6")],
       }),
       provider({
-        provider: ProviderDriverKind.make("claudeAgent"),
-        instanceId: "claudeAgent",
+        provider: ProviderDriverKind.make("pi"),
+        instanceId: "pi_work",
         models: [model("claude-opus-4-8", false, true)],
       }),
     ];
@@ -548,7 +609,7 @@ describe("resolveDefaultProviderModelSelection", () => {
         instanceId: ProviderInstanceId.make("removed-provider"),
         model: "stale-model",
       }),
-    ).toEqual({ instanceId: "claudeAgent", model: "claude-opus-4-8" });
+    ).toEqual({ instanceId: "pi_work", model: "claude-opus-4-8" });
   });
 
   it.each([{ enabled: false }, { availability: "unavailable" as const }])(
@@ -556,24 +617,24 @@ describe("resolveDefaultProviderModelSelection", () => {
     (requestedState) => {
       const providers = [
         provider({
-          provider: ProviderDriverKind.make("codex"),
-          instanceId: "codex",
+          provider: ProviderDriverKind.make("pi"),
+          instanceId: "pi",
           models: [model("gpt-5.6")],
           ...requestedState,
         }),
         provider({
-          provider: ProviderDriverKind.make("claudeAgent"),
-          instanceId: "claudeAgent",
+          provider: ProviderDriverKind.make("pi"),
+          instanceId: "pi_work",
           models: [model("claude-opus-4-8", false, true)],
         }),
       ];
 
       expect(
         resolveDefaultProviderModelSelection(providers, {
-          instanceId: ProviderInstanceId.make("codex"),
+          instanceId: ProviderInstanceId.make("pi"),
           model: "gpt-5.6",
         }),
-      ).toEqual({ instanceId: "claudeAgent", model: "claude-opus-4-8" });
+      ).toEqual({ instanceId: "pi_work", model: "claude-opus-4-8" });
     },
   );
 
@@ -583,8 +644,8 @@ describe("resolveDefaultProviderModelSelection", () => {
       resolveDefaultProviderModelSelection(
         [
           provider({
-            provider: ProviderDriverKind.make("codex"),
-            instanceId: "codex",
+            provider: ProviderDriverKind.make("pi"),
+            instanceId: "pi",
             enabled: false,
           }),
         ],
@@ -595,8 +656,8 @@ describe("resolveDefaultProviderModelSelection", () => {
       resolveDefaultProviderModelSelection(
         [
           provider({
-            provider: ProviderDriverKind.make("codex"),
-            instanceId: "codex",
+            provider: ProviderDriverKind.make("pi"),
+            instanceId: "pi",
             availability: "unavailable",
           }),
         ],
@@ -607,8 +668,8 @@ describe("resolveDefaultProviderModelSelection", () => {
       resolveDefaultProviderModelSelection(
         [
           provider({
-            provider: ProviderDriverKind.make("codex"),
-            instanceId: "codex",
+            provider: ProviderDriverKind.make("pi"),
+            instanceId: "pi",
             status: "error",
           }),
         ],

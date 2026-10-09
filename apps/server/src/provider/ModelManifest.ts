@@ -263,6 +263,7 @@ export function applyManifestDefault(
   manifest: ModelManifestData,
   driverKind: ProviderDriverKind,
 ): ReadonlyArray<ServerProviderModel> {
+  if (driverKind === "pi") return models;
   const requestedSlug = manifestDefaultModel(manifest, driverKind);
   if (requestedSlug === undefined) return models;
   const slug =

@@ -2,7 +2,10 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 
-import { PI_T3_MCP_EXTENSION_SOURCE } from "./piT3McpExtensionSource.ts";
+import {
+  PI_T3_MCP_EXTENSION_SOURCE,
+  PI_RUNTIME_POLICY_STATE_COMMAND,
+} from "./piT3McpExtensionSource.ts";
 
 type RequestHook = (
   event: { payload: unknown },
@@ -88,6 +91,7 @@ async function loadMcpBridge(
       });
     },
     pi: {
+      registerCommand: () => undefined,
       on: (name: string, handler: AgentStartHook) => handlers.set(name, handler),
       registerTool: (tool: RegisteredTool) => {
         if (options.allowsTool && !options.allowsTool(tool.name)) return;
@@ -263,6 +267,88 @@ describe("Pi MCP tool exposure", () => {
 });
 
 describe("Pi tool discovery permissions", () => {
+  async function loadPolicyGuard(mode: string) {
+    type ToolHook = (
+      event: { toolName: string; input: unknown },
+      ctx: {
+        ui: { confirm: () => Promise<boolean> };
+      },
+    ) => Promise<{ block: boolean } | undefined>;
+    let toolHook: ToolHook | undefined;
+    const sessionHooks: Array<() => void> = [];
+    let stateCommand:
+      | ((args: string, ctx: { ui: { notify: (message: string) => void } }) => Promise<void>)
+      | undefined;
+    const source = NodeModule.stripTypeScriptTypes(
+      PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
+        "export default async function",
+        "async function",
+      ),
+    );
+    await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
+      process: { env: { T3_PI_RUNTIME_MODE: mode, T3_PI_POLICY_TOKEN: "secret" } },
+      pi: {
+        on: (name: string, handler: ToolHook) => {
+          if (name === "tool_call") toolHook = handler;
+          if (name === "session_start") sessionHooks.push(handler as unknown as () => void);
+        },
+        registerCommand: (name: string, command: { handler: typeof stateCommand }) => {
+          assert.equal(name, PI_RUNTIME_POLICY_STATE_COMMAND);
+          stateCommand = command.handler;
+        },
+      },
+    });
+    return { toolHook: toolHook!, stateCommand: stateCommand!, reset: sessionHooks[0]! };
+  }
+
+  it.each([
+    ["approval-required", "read", 0],
+    ["approval-required", "edit", 1],
+    ["approval-required", "bash", 1],
+    ["auto-accept-edits", "write", 0],
+    ["auto-accept-edits", "bash", 1],
+    ["full-access", "bash", 0],
+    ["full-access", "custom-extension-tool", 0],
+  ] as const)("preserves base mode %s for %s", async (mode, toolName, count) => {
+    const guard = await loadPolicyGuard(mode);
+    let confirmations = 0;
+    const result = await guard.toolHook(
+      { toolName, input: {} },
+      {
+        ui: {
+          confirm: async () => {
+            confirmations += 1;
+            return false;
+          },
+        },
+      },
+    );
+    assert.equal(confirmations, count);
+    assert.equal(result?.block ?? false, count > 0);
+  });
+
+  it("blocks every Auto tool until the authenticated state command and resets on native sessions", async () => {
+    const guard = await loadPolicyGuard("auto");
+    const ctx = {
+      ui: {
+        confirm: async () => {
+          throw new Error("Auto must not use builtin confirmation fallback");
+        },
+      },
+    };
+    const notices: string[] = [];
+    const commandCtx = { ui: { notify: (message: string) => notices.push(message) } };
+    assert.equal((await guard.toolHook({ toolName: "read", input: {} }, ctx))?.block, true);
+    await guard.stateCommand("wrong auto example-auto request-1", commandCtx);
+    assert.equal(notices.length, 0);
+    assert.equal((await guard.toolHook({ toolName: "bash", input: {} }, ctx))?.block, true);
+    await guard.stateCommand("secret auto example-auto request-2", commandCtx);
+    assert.include(notices[0]!, '"requestId":"request-2"');
+    assert.isUndefined(await guard.toolHook({ toolName: "bash", input: {} }, ctx));
+    guard.reset();
+    assert.equal((await guard.toolHook({ toolName: "write", input: {} }, ctx))?.block, true);
+  });
+
   it("allows discovery without confirmation and still gates the discovered tool", async () => {
     type ToolCallHook = (
       event: { toolName: string; input: unknown },
@@ -279,6 +365,7 @@ describe("Pi tool discovery permissions", () => {
     await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
       process: { env: { T3_PI_RUNTIME_MODE: "approval-required" } },
       pi: {
+        registerCommand: () => undefined,
         on: (name: string, handler: ToolCallHook) => {
           if (name === "tool_call") toolCall = handler;
         },
@@ -322,7 +409,10 @@ async function loadRequestHook(): Promise<RequestHook> {
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
     process: { env: {} },
-    pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
+    pi: {
+      registerCommand: () => undefined,
+      on: (name: string, handler: RequestHook) => handlers.set(name, handler),
+    },
   });
   const hook = handlers.get("before_provider_request");
   assert.isDefined(hook);

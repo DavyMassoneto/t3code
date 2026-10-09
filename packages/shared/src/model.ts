@@ -1,6 +1,7 @@
 import {
   type CustomModelSetting,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
+  PI_RUNTIME_POLICY_OPTION_ID,
   ModelCapabilities,
   type ModelSelection,
   ProviderDriverKind,
@@ -12,7 +13,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { copySorted } from "./Array.ts";
 
-const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
+const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("pi");
 
 /** Choose the command for a model change against the thread's current provider instance. */
 export function modelSelectionCommandType(
@@ -293,9 +294,16 @@ export function buildExplicitProviderOptionSelectionsFromDescriptors(
     return undefined;
   }
   const explicitIds = new Set(selections.map((selection) => selection.id));
-  const normalized = buildProviderOptionSelectionsFromDescriptors(descriptors)?.filter(
-    (selection) => explicitIds.has(selection.id),
+  const normalized =
+    buildProviderOptionSelectionsFromDescriptors(descriptors)?.filter(
+      (selection) => explicitIds.has(selection.id) && selection.id !== PI_RUNTIME_POLICY_OPTION_ID,
+    ) ?? [];
+  const runtimePolicy = selections.find(
+    (selection) => selection.id === PI_RUNTIME_POLICY_OPTION_ID,
   );
+  if (runtimePolicy) {
+    normalized.push(cloneSelection(runtimePolicy));
+  }
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 

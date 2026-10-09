@@ -165,6 +165,9 @@ import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
+import * as PiPackages from "./provider/PiPackages.ts";
+import * as PiConnections from "./provider/PiConnections.ts";
+import * as PiConnectionCredentials from "./provider/PiConnectionCredentials.ts";
 import * as AcpRegistrySupport from "./provider/acp/AcpRegistrySupport.ts";
 import * as AcpRegistryRuntimeCoordinator from "./provider/acp/AcpRegistryRuntimeCoordinator.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
@@ -1273,6 +1276,9 @@ const layerWsRpc = (
       const modelManifest = yield* ModelManifest.ModelManifest;
       const providerVersionCache = yield* ProviderMaintenance.ProviderVersionCache;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+      const piPackages = yield* PiPackages.PiPackages;
+      const piConnections = yield* PiConnections.PiConnections;
+      const piConnectionCredentials = yield* PiConnectionCredentials.PiConnectionCredentials;
       const acpRegistryCatalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
       const acpRegistryRuntimeCoordinator =
         yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
@@ -1815,6 +1821,9 @@ const layerWsRpc = (
       });
 
       const handlers = ServerWsRpcGroup.of({
+        [WS_METHODS.serverListPiConnections]: (input) => piConnections.list(input),
+        [WS_METHODS.serverSetPiConnectionApiKey]: (input) =>
+          piConnectionCredentials.setApiKey(input),
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -1833,6 +1842,11 @@ const layerWsRpc = (
               ? { "orchestration_v2.source_thread_id": command.sourceThreadId }
               : {}),
           }).pipe(
+            Effect.andThen(
+              command.type === "thread.create"
+                ? (serverSettings.refreshNativeDefaults ?? Effect.void)
+                : Effect.void,
+            ),
             Effect.andThen(
               startup
                 .enqueueCommand(
@@ -2074,6 +2088,9 @@ const layerWsRpc = (
             Effect.andThen(scheduledTasks.getWebhookDelivery(input)),
           ),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
+        [WS_METHODS.serverSearchPiPackages]: (input) => piPackages.search(input),
+        [WS_METHODS.serverListPiPackages]: (input) => piPackages.list(input),
+        [WS_METHODS.serverMutatePiPackage]: (input) => piPackages.mutate(input),
         [WS_METHODS.serverGetConfig]: (_input) => loadServerConfig({ usageLimitsCommand: false }),
         [WS_METHODS.serverSearchAcpRegistry]: (input) =>
           acpRegistryCatalog
@@ -2205,6 +2222,7 @@ const layerWsRpc = (
             if (input.instanceId === undefined) {
               yield* usageLimitSources.refresh;
             }
+            yield* serverSettings.refreshNativeDefaults ?? Effect.void;
             let providers = yield* input.cwd !== undefined && input.instanceId !== undefined
               ? providerRegistry.refreshWorkspaceSnapshot({
                   instanceId: input.instanceId,
@@ -2387,7 +2405,10 @@ const layerWsRpc = (
             return { keybindings: keybindingsConfig, issues: [] };
           }),
         [WS_METHODS.serverGetSettings]: (_input) =>
-          serverSettings.getSettings.pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
+          (serverSettings.refreshNativeDefaults ?? Effect.void).pipe(
+            Effect.andThen(serverSettings.getSettings),
+            Effect.map(ServerSettings.redactServerSettingsForClient),
+          ),
         [WS_METHODS.serverUpdateSettings]: ({ patch, providerInstanceMutation }) =>
           Effect.gen(function* () {
             const deviceHosts = patch.deviceHosts
@@ -3192,6 +3213,7 @@ export const layer = Layer.unwrap(
               Layer.provide(DefectReporter.layer),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(AgentSessionScanner.layer),
+              Layer.provide(PiConnections.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               // One server-lifetime service means clients share the same PR caches, and a WS

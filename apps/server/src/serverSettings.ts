@@ -62,6 +62,7 @@ import {
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import { PiNativeDefaults } from "./provider/PiNativeDefaults.ts";
 
 export { resolveSourceControlWriterModelSelection } from "@t3tools/shared/serverSettings";
 
@@ -262,6 +263,7 @@ export class ServerSettingsService extends Context.Service<
 
     /** Read the current settings. */
     readonly getSettings: Effect.Effect<ServerSettings, ServerSettingsError>;
+    readonly refreshNativeDefaults?: Effect.Effect<void>;
 
     /** Patch settings and persist. Returns the new full settings object. */
     readonly updateSettings: (
@@ -635,6 +637,67 @@ const make = Effect.gen(function* () {
   const pathService = yield* Path.Path;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const sql = yield* SqlClient.SqlClient;
+  const nativeDefaults = yield* Effect.serviceOption(PiNativeDefaults);
+  const nativeWorkspaces = sql<{ readonly projectId: string; readonly workspaceRoot: string }>`
+    SELECT project_id AS "projectId", workspace_root AS "workspaceRoot"
+    FROM projection_projects WHERE deleted_at IS NULL
+  `.pipe(
+    Effect.map((rows) => Object.fromEntries(rows.map((row) => [row.projectId, row.workspaceRoot]))),
+    Effect.mapError(
+      (cause) =>
+        new ServerSettingsError({ settingsPath, operation: "read-project-settings", cause }),
+    ),
+  );
+  const nativeWorkspacesCache = yield* Cache.makeWith<
+    string,
+    Record<string, string>,
+    ServerSettingsError
+  >(() => nativeWorkspaces, {
+    capacity: 1,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.seconds(30) : Duration.zero),
+  });
+  const invalidateNativeDefaults = Option.isSome(nativeDefaults)
+    ? Effect.all([nativeDefaults.value.invalidate, Cache.invalidateAll(nativeWorkspacesCache)], {
+        discard: true,
+      })
+    : Effect.void;
+  const readNativeDefaults = (settings: ServerSettings) =>
+    Option.isSome(nativeDefaults)
+      ? Cache.get(nativeWorkspacesCache, "projects").pipe(
+          Effect.flatMap((workspaces) => nativeDefaults.value.read(settings, workspaces)),
+        )
+      : Effect.succeed(settings);
+  const persistNativeDefaults = (
+    current: ServerSettings,
+    updated: ServerSettings,
+    patch: ServerSettingsPatch,
+  ) =>
+    Option.isSome(nativeDefaults) &&
+    (patch.defaultModelSelection !== undefined || patch.projectSettingsOverrides !== undefined)
+      ? invalidateNativeDefaults.pipe(
+          Effect.andThen(materializeProviderEnvironmentSecrets(updated)),
+          Effect.flatMap((materialized) =>
+            nativeWorkspaces.pipe(
+              Effect.flatMap((workspaces) =>
+                nativeDefaults.value
+                  .read(
+                    {
+                      ...materialized,
+                      defaultModelSelection: current.defaultModelSelection,
+                      projectSettingsOverrides: current.projectSettingsOverrides,
+                    },
+                    workspaces,
+                  )
+                  .pipe(
+                    Effect.flatMap((effective) =>
+                      nativeDefaults.value.write(effective, patch, workspaces),
+                    ),
+                  ),
+              ),
+            ),
+          ),
+        )
+      : Effect.void;
   const writeSemaphore = yield* Semaphore.make(1);
   const cacheKey = "settings" as const;
   const changesPubSub = yield* PubSub.unbounded<ServerSettings>();
@@ -949,6 +1012,13 @@ const make = Effect.gen(function* () {
         ),
       ),
       Stream.map(resolveTextGenerationProvider),
+      Stream.mapEffect((settings) =>
+        readNativeDefaults(settings).pipe(
+          Effect.catch(() =>
+            Effect.logWarning("Could not refresh native Pi defaults").pipe(Effect.as(settings)),
+          ),
+        ),
+      ),
     );
 
   type SecretChange = {
@@ -1243,7 +1313,7 @@ const make = Effect.gen(function* () {
         );
         yield* Cache.set(settingsCache, cacheKey, next);
         yield* emitChange(next);
-        return resolveTextGenerationProvider(materialized);
+        return yield* readNativeDefaults(resolveTextGenerationProvider(materialized));
       }),
     );
 
@@ -1252,9 +1322,26 @@ const make = Effect.gen(function* () {
       getSettingsFromCache.pipe(
         Effect.flatMap(materializeProviderEnvironmentSecrets),
         Effect.map(resolveTextGenerationProvider),
+        Effect.flatMap(readNativeDefaults),
         Effect.flatMap(use),
       ),
     );
+
+  const refreshNativeDefaults = Option.isSome(nativeDefaults)
+    ? writeSemaphore
+        .withPermits(1)(
+          invalidateNativeDefaults.pipe(
+            Effect.andThen(getSettingsFromCache),
+            Effect.flatMap(materializeProviderEnvironmentSecrets),
+            Effect.map(resolveTextGenerationProvider),
+            Effect.flatMap(readNativeDefaults),
+            Effect.flatMap(emitChange),
+          ),
+        )
+        .pipe(
+          Effect.catch(() => Effect.logWarning("Could not publish refreshed native Pi defaults")),
+        )
+    : Effect.void;
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
@@ -1368,17 +1455,37 @@ const make = Effect.gen(function* () {
     getSettings: getSettingsFromCache.pipe(
       Effect.flatMap(materializeProviderEnvironmentSecrets),
       Effect.map(resolveTextGenerationProvider),
+      Effect.flatMap(readNativeDefaults),
     ),
+    refreshNativeDefaults,
     updateSettings: (patch) =>
       updateAndPersistSettings((current) =>
-        Effect.succeed(applyServerSettingsPatch(current, patch)),
+        Effect.gen(function* () {
+          const selection = current.defaultModelSelection;
+          const instance = selection ? current.providerInstances[selection.instanceId] : undefined;
+          const followsNative =
+            Option.isSome(nativeDefaults) &&
+            patch.defaultModelSelection === null &&
+            selection &&
+            (instance ? instance.driver === "pi" : selection.instanceId === "pi");
+          const effectivePatch = followsNative
+            ? { ...patch, defaultModelSelection: selection }
+            : patch;
+          const updated = yield* normalizeServerSettings(
+            applyServerSettingsPatch(current, effectivePatch),
+          );
+          yield* persistNativeDefaults(current, updated, patch);
+          return updated;
+        }),
       ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateAndPersistSettings((current) =>
         Effect.gen(function* () {
           yield* ensureProviderInstanceMutationAllowed(current, mutation, settingsPath);
           const patched = applyServerSettingsPatch(current, patch);
-          return applyProviderInstanceMutation(patched, mutation);
+          const updated = applyProviderInstanceMutation(patched, mutation);
+          yield* persistNativeDefaults(current, updated, patch);
+          return updated;
         }),
       ),
     withSettingsSnapshot,

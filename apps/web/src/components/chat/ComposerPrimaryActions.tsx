@@ -360,7 +360,15 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       <TooltipPopup>{submitTooltip}</TooltipPopup>
     </Tooltip>
   );
-  if (compactTokens === null) return submit;
+  const primaryActions = canInterrupt ? (
+    <div className="flex items-center gap-2">
+      {renderStopGenerationButton(false)}
+      {submit}
+    </div>
+  ) : (
+    submit
+  );
+  if (compactTokens === null) return primaryActions;
 
   return (
     <div data-chat-composer-compact-send="true" className="flex items-center gap-2">
@@ -393,7 +401,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             : `Next send compacts ${compactTokens} tokens first. Click to keep full history`}
         </TooltipPopup>
       </Tooltip>
-      {submit}
+      {primaryActions}
     </div>
   );
 });

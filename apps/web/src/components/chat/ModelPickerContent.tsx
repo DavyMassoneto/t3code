@@ -43,9 +43,18 @@ import { InlineButton } from "../ui/button";
 import {
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
+  getNativePiDefaultModel,
+  isLegacyPiDefaultModel,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
+import {
+  adjacentNativePiModelGroup,
+  buildNativePiModelGroups,
+  nativePiModelMatchesGroup,
+  nativePiModelPresentation,
+  nativePiModelService,
+} from "./nativePiModelGroups";
 
 type ModelPickerItem = {
   slug: string;
@@ -62,6 +71,7 @@ type ModelPickerItem = {
   continuationGroupKey?: string | undefined;
   isLegacy?: boolean | undefined;
   isUnavailable?: boolean | undefined;
+  isDefault?: boolean | undefined;
 };
 
 export function resolveModelPickerSelectedModel(input: {
@@ -69,6 +79,10 @@ export function resolveModelPickerSelectedModel(input: {
   model: string;
   options: ReadonlyArray<ModelEsque>;
 }) {
+  if (input.driverKind === "pi" && isLegacyPiDefaultModel(input.model)) {
+    const model = getNativePiDefaultModel(input.options);
+    return input.options.find((option) => option.slug === model);
+  }
   if (input.driverKind === "antigravity" && input.model === ANTIGRAVITY_DEFAULT_MODEL) {
     const availableModels = input.options.filter(
       (option) => option.slug !== ANTIGRAVITY_DEFAULT_MODEL && !option.isUnavailable,
@@ -87,13 +101,16 @@ export function shouldIncludeModelPickerOption(input: {
   readonly activeInstanceId: ProviderInstanceId;
   readonly activeModel: string;
 }): boolean {
+  if (input.entry.driverKind === "pi" && isLegacyPiDefaultModel(input.option.slug)) return false;
   if (input.entry.driverKind === "antigravity" && input.option.slug === ANTIGRAVITY_DEFAULT_MODEL) {
     return false;
   }
   if (isProviderInstancePickerReady(input.entry)) return true;
   return (
     input.entry.enabled &&
-    (input.entry.driverKind === "opencode" || input.entry.driverKind === "antigravity") &&
+    (input.entry.driverKind === "opencode" ||
+      input.entry.driverKind === "antigravity" ||
+      input.entry.driverKind === "pi") &&
     input.entry.instanceId === input.activeInstanceId &&
     input.option.slug === input.activeModel &&
     input.option.isUnavailable === true
@@ -188,11 +205,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const {
     keybindings: providedKeybindings,
     modelOptionsByInstance,
-    instanceEntries,
+    instanceEntries: allInstanceEntries,
     getModelDisabledReason,
     onInstanceModelChange,
     onToggleModel,
   } = props;
+  const instanceEntries = useMemo(
+    () => allInstanceEntries.filter((entry) => entry.driverKind === "pi"),
+    [allInstanceEntries],
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [showTopScrollFade, setShowTopScrollFade] = useState(false);
   const [showBottomScrollFade, setShowBottomScrollFade] = useState(false);
@@ -273,6 +294,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ),
   );
   const serverKeybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const [selectedServiceId, setSelectedServiceId] = useState(
+    () => nativePiModelService(activeModel ?? { slug: activeModelSlug }).id,
+  );
   const keybindings = providedKeybindings ?? serverKeybindings;
   const updateSettings = useUpdateClientSettings();
 
@@ -363,7 +387,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     const out: ModelPickerItem[] = [];
     for (const [instanceId, models] of modelOptionsByInstance) {
       const entry = entryByInstanceId.get(instanceId);
-      if (!entry) {
+      if (!entry || entry.driverKind !== "pi") {
         // Instance disappeared between renders (configuration change). Skip
         // its models — stale options shouldn't appear in the picker.
         continue;
@@ -387,6 +411,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           ...(model.badge ? { badge: model.badge } : {}),
           ...(model.isLegacy ? { isLegacy: true } : {}),
           ...(model.isUnavailable ? { isUnavailable: true } : {}),
+          ...(model.isDefault ? { isDefault: true } : {}),
           instanceId,
           driverKind: entry.driverKind,
           instanceDisplayName: entry.displayName,
@@ -433,6 +458,30 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return [...available, ...disabled];
   }, [instanceEntries, isLocked, matchesLockedProvider]);
   const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
+  const sidebarGroups = useMemo(
+    () => buildNativePiModelGroups(sidebarInstanceEntries, modelOptionsByInstance),
+    [sidebarInstanceEntries, modelOptionsByInstance],
+  );
+  const selectedGroup =
+    sidebarGroups.find(
+      (group) =>
+        group.entry.instanceId === selectedInstanceId && group.service.id === selectedServiceId,
+    ) ?? sidebarGroups.find((group) => group.entry.instanceId === selectedInstanceId);
+  const selectedGroupKey =
+    selectedInstanceId === "favorites" ? "favorites" : (selectedGroup?.key ?? "");
+  const handleSelectGroup = useCallback(
+    (key: string) => {
+      if (key === "favorites") {
+        handleSelectInstance("favorites");
+        return;
+      }
+      const group = sidebarGroups.find((candidate) => candidate.key === key);
+      if (!group) return;
+      setSelectedServiceId(group.service.id);
+      handleSelectInstance(group.entry.instanceId);
+    },
+    [handleSelectInstance, sidebarGroups],
+  );
   const instanceOrder = useMemo(
     () => instanceEntries.map((entry) => entry.instanceId),
     [instanceEntries],
@@ -453,7 +502,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               ...(model.shortName ? { shortName: model.shortName } : {}),
               ...(model.subProvider ? { subProvider: model.subProvider } : {}),
               driverKind: model.driverKind,
-              providerDisplayName: model.instanceDisplayName,
+              providerDisplayName: `${nativePiModelService(model).label} ${model.instanceDisplayName}`,
               isFavorite: favoritesSet.has(providerModelKey(model.instanceId, model.slug)),
             },
             searchQuery,
@@ -464,7 +513,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             ...(model.shortName ? { shortName: model.shortName } : {}),
             ...(model.subProvider ? { subProvider: model.subProvider } : {}),
             driverKind: model.driverKind,
-            providerDisplayName: model.instanceDisplayName,
+            providerDisplayName: `${nativePiModelService(model).label} ${model.instanceDisplayName}`,
           }),
         }))
         .filter(
@@ -529,6 +578,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       result = result.filter((m) => m.instanceId === selectedInstanceId);
     }
 
+    if (selectedInstanceId !== "favorites" && selectedGroup) {
+      result = result.filter((model) =>
+        nativePiModelMatchesGroup(selectedGroup, model.instanceId, model),
+      );
+    }
     return sortProviderModelItems(result, {
       favoriteModelKeys: favoritesSet,
       groupFavorites: selectedInstanceId !== "favorites",
@@ -542,6 +596,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     props.lockedProvider,
     searchQuery,
     selectedInstanceId,
+    selectedGroup,
   ]);
 
   const legacySection = useMemo(() => {
@@ -610,7 +665,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         return;
       }
       const entry = entryByInstanceId.get(instanceId);
-      if (!entry) {
+      if (!entry || entry.driverKind !== "pi") {
         return;
       }
       // `resolveSelectableModel` uses the driver kind for normalization
@@ -765,15 +820,17 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       if (command === "modelPicker.previousProvider" || command === "modelPicker.nextProvider") {
         event.preventDefault();
         event.stopPropagation();
-        const next = adjacentModelPickerProvider({
-          entries: sidebarInstanceEntries,
-          selectedInstanceId,
+        const next = adjacentNativePiModelGroup({
+          groups: sidebarGroups,
+          selectedKey: selectedGroupKey,
           direction: command === "modelPicker.nextProvider" ? 1 : -1,
-          disabledInstanceIds: lockedDisabledInstanceIds,
-          selectableUnavailableInstanceIds,
+          isSelectable: (entry) =>
+            !lockedDisabledInstanceIds?.has(entry.instanceId) &&
+            (isProviderInstancePickerReady(entry) ||
+              selectableUnavailableInstanceIds?.has(entry.instanceId) === true),
         });
         setSearchQuery("");
-        handleSelectInstance(next);
+        handleSelectGroup(next);
         return;
       }
       const jumpIndex = modelPickerJumpIndexFromCommand(command ?? "");
@@ -801,14 +858,14 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     };
   }, [
     handleModelSelect,
-    handleSelectInstance,
+    handleSelectGroup,
     keybindings,
     lockedDisabledInstanceIds,
     modelJumpModelKeys,
     modelJumpShortcutContext,
     selectableUnavailableInstanceIds,
-    selectedInstanceId,
-    sidebarInstanceEntries,
+    sidebarGroups,
+    selectedGroupKey,
   ]);
 
   useLayoutEffect(() => {
@@ -837,10 +894,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         {/* Sidebar */}
         {showSidebar && (
           <ModelPickerSidebar
-            selectedInstanceId={selectedInstanceId}
-            onSelectInstance={handleSelectInstance}
+            selectedGroupKey={selectedGroupKey}
+            onSelectGroup={handleSelectGroup}
             onFocusSearch={focusSearchInput}
-            instanceEntries={sidebarInstanceEntries}
+            groups={sidebarGroups}
             showFavorites
             {...(selectableUnavailableInstanceIds ? { selectableUnavailableInstanceIds } : {})}
             {...(lockedDisabledInstanceIds
@@ -1004,14 +1061,18 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     }
                     const disabledReason =
                       getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                    const presentation = nativePiModelPresentation(
+                      entryByInstanceId.get(model.instanceId)!,
+                      model,
+                    );
                     return (
                       <ModelListRow
                         key={modelKey}
                         index={index}
-                        model={model}
+                        model={presentation.model}
                         instanceId={model.instanceId}
-                        driverKind={model.driverKind}
-                        providerDisplayName={model.instanceDisplayName}
+                        driverKind={presentation.iconDriverKind}
+                        providerDisplayName={presentation.label}
                         providerAccentColor={model.instanceAccentColor}
                         acpRegistryAgentId={model.acpRegistryAgentId}
                         acpRegistryIconUrl={model.acpRegistryIconUrl}

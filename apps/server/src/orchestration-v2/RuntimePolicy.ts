@@ -129,7 +129,10 @@ export const layerFromProjectStore: Layer.Layer<
             ),
           ));
         return ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
+          runtimeMode:
+            input.thread.runtimeMode === "auto" && instance?.driverKind === "pi"
+              ? "auto"
+              : providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
           cwd,
         });

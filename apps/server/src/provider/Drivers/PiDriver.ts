@@ -7,6 +7,8 @@
  * `~/.pi/agent`, so continuation identity uses the default instance grouping.
  */
 import { PiSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -37,6 +39,10 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { makePiOpenaiQuotaAuth } from "../PiOpenaiQuotaAuth.ts";
+import { resolveNativePiSdkRoot } from "../nativePiSdkRoot.ts";
+import { resolveNativePiAgentDirectory } from "../nativePiAgentDirectory.ts";
+import { expandHomePathWith } from "../../pathExpansion.ts";
 import {
   makeCachedProviderMaintenanceResolution,
   makePackageManagedProviderMaintenanceResolver,
@@ -60,6 +66,7 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
 
 export type PiDriverEnv =
   | PiAdapterV2DriverEnv
+  | Crypto.Crypto
   | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
@@ -181,6 +188,42 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         ),
       );
 
+      const platform = yield* HostProcessPlatform;
+      const sdkRoot = effectiveConfig.enabled
+        ? yield* resolveNativePiSdkRoot({
+            binaryPath: effectiveConfig.binaryPath,
+            environment: processEnv,
+          })
+        : undefined;
+      const agentDir = yield* Effect.try(() =>
+        resolveNativePiAgentDirectory({
+          environment: processEnv,
+          platform,
+          fallbackHome: expandHomePathWith("~", pathService),
+          path: pathService,
+        }),
+      ).pipe(Effect.orElseSucceed(() => undefined));
+      const auth =
+        sdkRoot && agentDir
+          ? yield* makePiOpenaiQuotaAuth({
+              instanceId,
+              sdkRoot,
+              agentDir,
+              cwd,
+              environment: processEnv,
+              onChanged: snapshot.refresh.pipe(Effect.ignore),
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderDriverError({
+                    driver: DRIVER_KIND,
+                    instanceId,
+                    detail: "Failed to initialize native Pi quota authorization.",
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -188,6 +231,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         displayName,
         accentColor,
         enabled,
+        ...(auth ? { auth } : {}),
         snapshot,
         snapshotForCwd: (workspaceCwd) =>
           !effectiveConfig.enabled

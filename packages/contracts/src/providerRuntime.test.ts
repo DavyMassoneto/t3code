@@ -1,7 +1,69 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { ProviderRuntimeEvent } from "./providerRuntime.ts";
+import {
+  PI_RUNTIME_POLICY_ACK_PREFIX,
+  PI_RUNTIME_POLICY_COMMAND_PREFIX,
+  PI_RUNTIME_POLICY_METADATA_PREFIX,
+  PI_RUNTIME_POLICY_OPTION_ID,
+  ProviderRuntimeEvent,
+  ProviderRuntimePolicy,
+} from "./index.ts";
+import { ModelSelection } from "./modelSelection.ts";
+import { RuntimeMode } from "./providerPolicy.ts";
+
+const baseRuntimePolicy = {
+  id: "review",
+  label: "Review",
+  extensionName: "review-plugin",
+  command: `${PI_RUNTIME_POLICY_COMMAND_PREFIX}review`,
+};
+
+describe("ProviderRuntimePolicy", () => {
+  it("round-trips policies with and without optional descriptions", () => {
+    for (const policy of [
+      baseRuntimePolicy,
+      { ...baseRuntimePolicy, description: "Review changes" },
+    ]) {
+      const parsed = Schema.decodeUnknownSync(ProviderRuntimePolicy)(policy);
+      expect(parsed).toEqual(policy);
+      expect(Schema.encodeSync(ProviderRuntimePolicy)(parsed)).toEqual(policy);
+    }
+  });
+
+  it.each(["id", "label", "extensionName", "command"])("requires a non-blank %s", (field) => {
+    for (const invalidValue of [undefined, "", "   ", 42]) {
+      expect(() =>
+        Schema.decodeUnknownSync(ProviderRuntimePolicy)({
+          ...baseRuntimePolicy,
+          [field]: invalidValue,
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("carries a plugin selection as a model option with runtime mode auto", () => {
+    const selection = {
+      instanceId: "pi",
+      model: "default",
+      options: [{ id: PI_RUNTIME_POLICY_OPTION_ID, value: baseRuntimePolicy.id }],
+    };
+
+    expect(Schema.decodeUnknownSync(RuntimeMode)("auto")).toBe("auto");
+    expect(Schema.decodeUnknownSync(ModelSelection)(selection)).toEqual(selection);
+    expect(
+      Schema.encodeSync(ModelSelection)(Schema.decodeUnknownSync(ModelSelection)(selection)),
+    ).toEqual(selection);
+    expect(() => Schema.decodeUnknownSync(RuntimeMode)(baseRuntimePolicy.id)).toThrow();
+  });
+
+  it("exports the agreed Pi protocol constants from the package root", () => {
+    expect(PI_RUNTIME_POLICY_OPTION_ID).toBe("piRuntimePolicy");
+    expect(PI_RUNTIME_POLICY_COMMAND_PREFIX).toBe("pi-desktop-policy-");
+    expect(PI_RUNTIME_POLICY_METADATA_PREFIX).toBe("pi-desktop-policy/v1:");
+    expect(PI_RUNTIME_POLICY_ACK_PREFIX).toBe("PI_DESKTOP_POLICY_ACK:");
+  });
+});
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 

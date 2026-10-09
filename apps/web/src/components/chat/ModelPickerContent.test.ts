@@ -57,6 +57,8 @@ describe("shouldIncludeModelPickerOption", () => {
     ["opencode", "warning"],
     ["antigravity", "error"],
     ["antigravity", "warning"],
+    ["pi", "error"],
+    ["pi", "warning"],
   ] as const)(
     "keeps only the active synthetic %s row when the provider status is %s",
     (driver, status) => {
@@ -109,6 +111,42 @@ describe("shouldIncludeModelPickerOption", () => {
 });
 
 describe("resolveModelPickerSelectedModel", () => {
+  it.each(["default", "pi-default"])("never offers a synthetic Pi option %s", (marker) => {
+    const providerEntry = entry("ready", "pi");
+    expect(
+      shouldIncludeModelPickerOption({
+        entry: providerEntry,
+        option: { slug: marker, name: marker, isDefault: true },
+        activeInstanceId: providerEntry.instanceId,
+        activeModel: marker,
+      }),
+    ).toBe(false);
+  });
+  it.each(["default", "pi-default"])(
+    "resolves Pi marker %s only to the native configured default",
+    (marker) => {
+      const native = { slug: "plugin/native", name: "Native", isDefault: true };
+      const options = [
+        { slug: "default", name: "Default", isDefault: true },
+        { slug: "openai/first", name: "First" },
+        native,
+      ];
+      expect(
+        resolveModelPickerSelectedModel({
+          driverKind: ProviderDriverKind.make("pi"),
+          model: marker,
+          options,
+        }),
+      ).toBe(native);
+      expect(
+        resolveModelPickerSelectedModel({
+          driverKind: ProviderDriverKind.make("pi"),
+          model: marker,
+          options: options.slice(0, 2),
+        }),
+      ).toBeUndefined();
+    },
+  );
   it("follows the catalog default for the marker but keeps an explicit native model", () => {
     const driverKind = ProviderDriverKind.make("antigravity");
     const previousOptions = [

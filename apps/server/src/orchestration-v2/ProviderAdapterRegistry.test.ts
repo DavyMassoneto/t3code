@@ -328,3 +328,62 @@ it.effect("interrupts admitted session startup when a shared peer signs out", ()
     assert.isTrue(Exit.isFailure(yield* Fiber.await(startup)));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect("quota-only shared authorization does not block new inference session admission", () =>
+  Effect.gen(function* () {
+    const unused = () => Effect.die("unused quota auth operation");
+    const auth: ProviderAuthController = {
+      credentialBinding: { owner: "provider", key: "shared-native-quota" },
+      affectsInference: false,
+      isChangingCredentials: Effect.succeed(true),
+      withAccess: () => Effect.die("quota authorization must not gate inference"),
+      start: unused,
+      complete: unused,
+      cancel: unused,
+      logout: unused,
+      subscribe: () => Stream.empty,
+    };
+    const adapter: ProviderAdapterV2Shape = {
+      ...workAdapter,
+      openSession: (input) =>
+        Effect.fail(
+          new ProviderAdapterOpenSessionError({
+            driver,
+            providerSessionId: input.providerSessionId,
+            cause: "inference-admitted",
+          }),
+        ),
+    };
+    const related = [
+      { ...instances[0], auth },
+      { ...instances[1], auth, orchestrationAdapter: adapter },
+    ];
+    const registry = yield* Effect.service(ProviderAdapterRegistry.ProviderAdapterRegistryV2).pipe(
+      Effect.provide(
+        ProviderAdapterRegistry.layerFromProviderInstanceRegistry.pipe(
+          Layer.provide(
+            Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+              getInstance: (id) =>
+                Effect.succeed(related.find((instance) => instance.instanceId === id)),
+              listInstances: Effect.succeed(related),
+            }),
+          ),
+        ),
+      ),
+    );
+    const guarded = yield* registry.get(workId);
+    const error = yield* guarded
+      .openSession({
+        threadId: ThreadId.make("quota-inference"),
+        providerSessionId: ProviderSessionId.make("quota-inference-session"),
+        modelSelection: { instanceId: workId, model: "test-model" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: "/workspace",
+        },
+      })
+      .pipe(Effect.flip);
+    assert.equal(error.cause, "inference-admitted");
+  }),
+);

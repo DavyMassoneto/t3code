@@ -1,8 +1,9 @@
 import { Toolbar } from "@base-ui/react/toolbar";
 import { type ProviderInstanceId } from "@t3tools/contracts";
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import type { NativePiModelGroup } from "./nativePiModelGroups";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import {
@@ -41,16 +42,10 @@ const PICKER_TOOLTIP_SIDE = "left" as const;
 const PICKER_TOOLTIP_SIDE_OFFSET = 8;
 
 export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
-  selectedInstanceId: ProviderInstanceId | "favorites";
-  onSelectInstance: (instanceId: ProviderInstanceId | "favorites") => void;
+  selectedGroupKey: string;
+  onSelectGroup: (key: string) => void;
   onFocusSearch: () => void;
-  /**
-   * Instance entries to render as rail buttons. Each entry becomes one icon
-   * keyed by `instanceId`, so the default built-in Codex and a user-authored
-   * `codex_personal` appear as two distinct rail items, each routing to
-   * their own model list.
-   */
-  instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
+  groups: ReadonlyArray<NativePiModelGroup>;
   /** Render the favorites rail entry. Hidden for locked-provider instance switching. */
   showFavorites?: boolean;
   /** Instance ids shown in the rail but unavailable for the current picker context. */
@@ -65,11 +60,18 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
    */
   newBadgeInstanceIds?: ReadonlySet<ProviderInstanceId>;
 }) {
-  const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
-    props.onSelectInstance(instanceId);
+  const handleSelect = (key: string) => {
+    props.onSelectGroup(key);
   };
   const showFavorites = props.showFavorites ?? true;
-  const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
+  const instanceEntries = useMemo(
+    () =>
+      Array.from(
+        new Map(props.groups.map((group) => [group.entry.instanceId, group.entry])).values(),
+      ),
+    [props.groups],
+  );
+  const [hoveredGroupKey, setHoveredGroupKey] = useState<string | null>(null);
   const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
   useLayoutEffect(() => {
@@ -79,19 +81,19 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     }
     const selectedItem = Array.from(
       content.querySelectorAll<HTMLElement>("[data-model-picker-provider]"),
-    ).find((item) => item.dataset.modelPickerProvider === props.selectedInstanceId);
+    ).find((item) => item.dataset.modelPickerProvider === props.selectedGroupKey);
     if (!selectedItem) {
       setSelectedIndicatorTop(null);
       return;
     }
     setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
-  }, [props.instanceEntries, props.selectedInstanceId, showFavorites]);
+  }, [props.groups, props.selectedGroupKey, showFavorites]);
 
   return (
     <Toolbar.Root
       className="w-11 shrink-0 overflow-hidden bg-muted/30"
       data-model-picker-sidebar="true"
-      aria-label="Providers"
+      aria-label="Model services"
       orientation="vertical"
       onKeyDown={(event) => {
         if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -128,7 +130,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                         onClick={() => handleSelect("favorites")}
                         type="button"
                         aria-label="Favorites"
-                        aria-pressed={props.selectedInstanceId === "favorites"}
+                        aria-pressed={props.selectedGroupKey === "favorites"}
                       >
                         <StarIcon className="size-5 fill-current shrink-0" aria-hidden />
                       </Toolbar.Button>
@@ -147,26 +149,27 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             </>
           ) : null}
 
-          {/* Instance buttons (one per configured instance — built-in + custom) */}
-          {props.instanceEntries.map((entry) => {
+          {props.groups.map((group) => {
+            const entry = group.entry;
+            const label = `${group.service.label} · ${entry.displayName} (Pi)`;
             const isUnavailable = !isProviderInstancePickerReady(entry);
             const isContextDisabled = props.disabledInstanceIds?.has(entry.instanceId) ?? false;
             const unavailableSelectionIsReachable =
               props.selectableUnavailableInstanceIds?.has(entry.instanceId) ?? false;
             const isDisabled =
               (isUnavailable && !unavailableSelectionIsReachable) || isContextDisabled;
-            const isSelected = props.selectedInstanceId === entry.instanceId;
-            const isHovered = hoveredInstanceId === entry.instanceId;
+            const isSelected = props.selectedGroupKey === group.key;
+            const isHovered = hoveredGroupKey === group.key;
             const showNewBadge = props.newBadgeInstanceIds?.has(entry.instanceId) ?? false;
-            const showInstanceBadge = shouldShowInstanceBadge(entry, props.instanceEntries);
+            const showInstanceBadge = shouldShowInstanceBadge(entry, instanceEntries);
 
             const tooltip = isUnavailable
-              ? describeUnavailableInstance(entry)
+              ? `${label} — ${describeUnavailableInstance(entry)}`
               : isContextDisabled
                 ? (props.getDisabledInstanceTooltip?.(entry) ?? entry.displayName)
                 : showNewBadge
-                  ? `${entry.displayName} — New`
-                  : entry.displayName;
+                  ? `${label} — New`
+                  : label;
 
             const button = (
               <Toolbar.Button
@@ -175,14 +178,14 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                   isDisabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
                 )}
                 data-provider-accent-color={entry.accentColor}
-                onClick={() => !isDisabled && handleSelect(entry.instanceId)}
-                onMouseEnter={() => setHoveredInstanceId(entry.instanceId)}
+                onClick={() => !isDisabled && handleSelect(group.key)}
+                onMouseEnter={() => setHoveredGroupKey(group.key)}
                 onMouseLeave={() =>
-                  setHoveredInstanceId((current) => (current === entry.instanceId ? null : current))
+                  setHoveredGroupKey((current) => (current === group.key ? null : current))
                 }
-                onFocus={() => setHoveredInstanceId(entry.instanceId)}
+                onFocus={() => setHoveredGroupKey(group.key)}
                 onBlur={() =>
-                  setHoveredInstanceId((current) => (current === entry.instanceId ? null : current))
+                  setHoveredGroupKey((current) => (current === group.key ? null : current))
                 }
                 disabled={isDisabled}
                 focusableWhenDisabled={!isDisabled}
@@ -192,12 +195,12 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                   isUnavailable || isContextDisabled
                     ? tooltip
                     : showNewBadge
-                      ? `${entry.displayName}, new`
-                      : entry.displayName
+                      ? `${label}, new`
+                      : label
                 }
               >
                 <ProviderInstanceIcon
-                  driverKind={entry.driverKind}
+                  driverKind={group.service.iconDriverKind}
                   displayName={entry.displayName}
                   accentColor={entry.accentColor}
                   acpRegistryAgentId={entry.acpRegistryAgentId}
@@ -230,9 +233,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
 
             return (
               <div
-                key={entry.instanceId}
+                key={group.key}
                 className="relative w-full"
-                data-model-picker-provider={entry.instanceId}
+                data-model-picker-provider={group.key}
               >
                 <Tooltip>
                   <TooltipTrigger render={trigger} />

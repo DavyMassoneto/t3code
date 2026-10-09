@@ -111,10 +111,7 @@ import { projectEnvironment } from "../../state/projects";
 import { sourceControlEnvironment } from "../../state/sourceControl";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ProjectCloneBanner } from "../../components/ProjectCloneBanner";
-import {
-  isModelSelectionUnavailable,
-  resolveSelectableModelSelection,
-} from "../../lib/modelOptions";
+import { isModelSelectionUnavailable, resolveNewTaskModelSelection } from "../../lib/modelOptions";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
@@ -1232,11 +1229,12 @@ export function NewTaskDraftScreen(props: {
     if (appAtomRegistry.get(composerContextImportsAtom)[draftKey]) return;
     // Read the latest explicit pick. Antigravity selections stay unchanged
     // when setup or a catalog change makes them unavailable.
-    const modelSelection =
-      resolveSelectableModelSelection(
-        selectedEnvironmentServerConfig,
-        draft.modelSelection ?? null,
-      ) ?? flow.selectedModel;
+    const modelSelection = resolveNewTaskModelSelection({
+      draftSelection: draft.modelSelection ?? null,
+      projectDefaultSelection: null,
+      stickySelection: flow.selectedModel,
+      modelOptions: flow.modelOptions,
+    });
     const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;
     const initialMessageText = draft.text.trim();

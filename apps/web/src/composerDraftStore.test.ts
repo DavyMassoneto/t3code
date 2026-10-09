@@ -161,6 +161,51 @@ function resetComposerDraftStore() {
   });
 }
 
+it("publishes mode and reserved policy together in one durable draft-store update", () => {
+  resetComposerDraftStore();
+  const target = scopeThreadRef(
+    EnvironmentId.make("policy-environment"),
+    ThreadId.make("policy-thread"),
+  );
+  const instanceId = ProviderInstanceId.make("pi");
+  const published: Array<{ mode: string | null; options: ModelSelection["options"] }> = [];
+  const unsubscribe = useComposerDraftStore.subscribe((state) => {
+    const draft = state.getComposerDraft(target);
+    published.push({
+      mode: draft?.runtimeMode ?? null,
+      options: draft?.modelSelectionByProvider[instanceId]?.options,
+    });
+  });
+  try {
+    useComposerDraftStore
+      .getState()
+      .setModelSelection(
+        target,
+        createModelSelection(instanceId, "model", [{ id: "piRuntimePolicy", value: "review" }]),
+        {
+          explicit: true,
+          replaceOptions: true,
+          runtimeMode: "auto",
+        },
+      );
+    expect(published).toEqual([
+      { mode: "auto", options: [{ id: "piRuntimePolicy", value: "review" }] },
+    ]);
+    useComposerDraftStore
+      .getState()
+      .setModelSelection(target, createModelSelection(instanceId, "model"), {
+        explicit: true,
+        replaceOptions: true,
+        runtimeMode: "approval-required",
+      });
+    expect(published.at(-1)).toEqual({ mode: "approval-required", options: undefined });
+    expect(published).toHaveLength(2);
+  } finally {
+    unsubscribe();
+    resetComposerDraftStore();
+  }
+});
+
 function modelSelection(
   provider: ProviderDriverKind,
   model: string,

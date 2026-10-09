@@ -20,6 +20,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 
 export interface ProviderAuthController {
+  readonly affectsInference?: boolean;
   /** Equal keys mean these instances share credentials on this environment. */
   readonly credentialBinding?: { readonly owner: "provider" | "t3"; readonly key: string };
   readonly reconnectProfile?: (

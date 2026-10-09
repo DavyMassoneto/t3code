@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./provider-policy": {
+      "types": "./src/providerPolicy.ts",
+      "default": "./src/providerPolicy.ts"
+    },
     "./composerThreadItems": {
       "types": "./src/composerThreadItems.ts",
       "default": "./src/composerThreadItems.ts"
@@ -222,6 +226,10 @@
     "./state/server": {
       "types": "./src/state/server.ts",
       "default": "./src/state/server.ts"
+    },
+    "./state/piPackages": {
+      "types": "./src/state/piPackages.ts",
+      "default": "./src/state/piPackages.ts"
     },
     "./state/outdatedServerUpdate": {
       "types": "./src/state/outdatedServerUpdate.ts",

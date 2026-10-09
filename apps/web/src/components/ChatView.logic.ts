@@ -592,6 +592,7 @@ export function resolveComposerProviderSelection(input: {
     lockedContinuationGroupKey === null;
   const compatibleEntries = input.entries.filter(
     (entry) =>
+      (input.lockedProvider !== null || entry.driverKind === "pi") &&
       (!input.lockedProvider || entry.driverKind === input.lockedProvider) &&
       (!lockedContinuationGroupKey || entry.continuationGroupKey === lockedContinuationGroupKey) &&
       (!requiresExactInstance || entry.instanceId === input.lockedInstanceId),

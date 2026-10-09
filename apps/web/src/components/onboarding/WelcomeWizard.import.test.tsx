@@ -53,6 +53,10 @@ vi.mock("../../hooks/useLocalStorage", () => ({ useLocalStorage: () => [false, (
 vi.mock("../../hooks/useCopyToClipboard", () => ({
   useCopyToClipboard: () => ({ copyToClipboard: vi.fn(), copied: false }),
 }));
+vi.mock("../settings/ProviderAuthenticationSection", () => ({
+  ProviderAuthenticationSection: () => null,
+}));
+
 vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
 vi.mock("../clerk/useT3ConnectAuthPrompt", () => ({ useT3ConnectAuthPrompt: vi.fn() }));
 vi.mock("../../onboarding/firstRun", () => ({
@@ -177,7 +181,7 @@ function candidate(path: string): AgentSessionProjectCandidate {
   return {
     path,
     title: path.split("/").at(-1)!,
-    sources: ["codex"],
+    sources: ["pi"],
     threadCount: 10,
     lastActiveAt: new Date(Date.now() - 60_000).toISOString(),
     alreadyImported: false,
@@ -266,6 +270,46 @@ afterEach(async () => {
   state.registry?.dispose();
   state.sessions.clear();
   vi.unstubAllGlobals();
+});
+
+it("labels Pi history without advertising historical harnesses and keeps project import available", async () => {
+  const project = candidate("/projects/pi-history");
+  state.candidates = [{ ...project, sources: [...project.sources, "codex", "claudeAgent"] }];
+  await mountImport();
+
+  expect(
+    renderer!.root.findAll(
+      (node) => node.props.role === "img" && node.props["aria-label"] === "Pi",
+    ),
+  ).toHaveLength(1);
+  expect(
+    renderer!.root.findAll(
+      (node) =>
+        node.props.role === "img" && ["Codex", "Claude Code"].includes(node.props["aria-label"]),
+    ),
+  ).toHaveLength(0);
+  expect(text(renderer!.root)).toContain("10");
+  await click("Import 1 project");
+  expect(state.createProject).toHaveBeenCalledWith(
+    expect.objectContaining({
+      environmentId: primaryId,
+      input: expect.objectContaining({ workspaceRoot: project.path }),
+    }),
+  );
+  expect(state.importThreads).toHaveBeenCalledWith(
+    expect.objectContaining({
+      environmentId: primaryId,
+      input: expect.objectContaining({ expectedWorkspaceRoot: project.path }),
+    }),
+  );
+});
+
+it("describes empty history discovery as Pi without advertising legacy harnesses", async () => {
+  state.candidates = [];
+  await mountImport();
+  expect(text(renderer!.root)).toContain("No existing Pi projects found.");
+  expect(text(renderer!.root)).not.toContain("Claude Code");
+  expect(text(renderer!.root)).not.toContain("Codex");
 });
 
 it("keeps scanning, choosing and skipping available to a paired read-only environment", async () => {

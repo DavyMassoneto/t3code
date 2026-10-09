@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
+import * as DesktopConfig from "../app/DesktopConfig.ts";
 
 const {
   appendSwitchMock,
@@ -63,7 +65,7 @@ vi.mock("electron", () => ({
     getSystemLocale: getSystemLocaleMock,
     getVersion: getVersionMock,
     isPackaged: true,
-    name: "T3 Code",
+    name: "Pi Desktop",
     on: onMock,
     quit: quitMock,
     relaunch: relaunchMock,
@@ -109,6 +111,23 @@ describe("ElectronApp", () => {
         runningUnderArm64Translation: false,
       });
     }).pipe(Effect.provide(ElectronApp.layer)),
+  );
+
+  it.effect("does not register an OS protocol when explicitly suppressed", () =>
+    Effect.gen(function* () {
+      const electronApp = yield* ElectronApp.ElectronApp;
+      setAsDefaultProtocolClientMock.mockClear();
+      assert.equal(yield* electronApp.setAsDefaultProtocolClient("pi-desktop"), false);
+      assert.equal(setAsDefaultProtocolClientMock.mock.calls.length, 0);
+    }).pipe(
+      Effect.provide(
+        ElectronApp.layer.pipe(
+          Layer.provideMerge(
+            DesktopConfig.layerTest({ T3CODE_DESKTOP_SUPPRESS_PROTOCOL_REGISTRATION: "true" }),
+          ),
+        ),
+      ),
+    ),
   );
 
   it.effect("reads the OS locale through the service", () =>

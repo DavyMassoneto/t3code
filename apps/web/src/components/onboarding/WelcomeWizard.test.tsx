@@ -69,7 +69,7 @@ vi.mock("../../onboarding/useProjectScans", () => ({
             projectId: "test-project",
             threadCount: 29,
             lastActiveAt: new Date().toISOString(),
-            sources: ["codex"],
+            sources: ["pi"],
           },
         ],
       },
@@ -79,6 +79,10 @@ vi.mock("../../onboarding/useProjectScans", () => ({
 vi.mock("../../connection/onboarding", () => ({ connectPairing: vi.fn() }));
 vi.mock("../../state/terminal", () => ({ terminalEnvironment: {} }));
 vi.mock("../clerk/useT3ConnectAuthPrompt", () => ({ useT3ConnectAuthPrompt: vi.fn() }));
+vi.mock("../settings/ProviderAuthenticationSection", () => ({
+  ProviderAuthenticationSection: () => null,
+}));
+
 vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
 vi.mock("../ThreadTerminalDrawer", () => ({ TerminalViewport: () => null }));
 vi.mock("../settings/ChatGptWelcomeCoordinator", () => ({ ChatGptWelcomeCoordinator: () => null }));

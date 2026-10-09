@@ -1,135 +1,83 @@
-# T3 Code
+# T3 Code - Pi GUI
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+This fork uses **Pi as its coding-agent harness**, with T3 Code's graphical workspace around it. Pi owns model access, authentication, extensions, skills, context loading, and native conversation history. T3 Code adds project and thread management, approvals, Git workflows, terminals, previews, remote access, and subagent coordination.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
+Pi is the harness, not a single model service. Choose among the model providers authenticated and configured in Pi; separate Codex, Claude Code, Cursor, or other agent CLIs are not required for this fork.
 
-## "Wait, what are you selling me?"
+The repository retains T3 Code's web, Electron desktop, and mobile clients. Desktop build targets include Windows, macOS, and Linux. Not every native Pi terminal feature already has a graphical equivalent: see [Pi setup and graphical limitations](./docs/user/providers-pi.md).
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+## Install and authenticate Pi
 
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
+Install Pi on the machine that runs the T3 Code server, not just on a remote client. The adapter requires Pi **0.80.5 or newer**.
 
-## Installation
-
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
-
-### Command line
+With npm:
 
 ```bash
-curl -fsSL https://t3.codes/install.sh | sh
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+pi --version
+pi
 ```
 
-On Windows, in PowerShell:
+In Pi, run `/login` and select your model provider, or supply the provider's API-key environment variable. Pi's stored credentials normally live in `~/.pi/agent/auth.json`. Keep that file private. Configure Pi in T3 Code Settings and refresh it; if the server cannot find `pi`, set its binary path explicitly.
 
-```powershell
-irm https://t3.codes/install.ps1 | iex
-```
+On native Windows, Pi's Bash tool needs a working Bash installation, typically Git Bash. Pi also documents a Windows-native PowerShell tool. A Pi installation inside WSL belongs to that Linux environment; a Windows server does not automatically share its executable, credentials, or paths.
 
-Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, `t3 update` moves to a newer release, and `t3 --help` has the full reference.
+See [Pi setup](./docs/user/providers-pi.md) for configuration, sessions, permissions, and troubleshooting.
 
-To try it once without installing, run `npx t3@latest` instead.
+## Run this fork from source
 
-### Desktop app
+Use the Node.js version supported by this repository (`^24.13.1`) and install Vite+ (`vp`). Pi itself requires Node.js 22.19 or newer when installed through npm.
 
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
-
-#### Windows (`winget`)
-
-```bash
-winget install T3Tools.T3Code
-```
-
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Debian, Ubuntu (`.deb`)
-
-Download the `.deb` from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), then:
-
-```bash
-sudo apt install ./T3-Code-*.deb
-```
-
-#### Arch Linux (AUR)
-
-Stable:
-
-```bash
-yay -S t3code-bin
-```
-
-Nightly:
-
-```bash
-yay -S t3code-nightly-bin
-```
-
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
-
-## Some notes
-
-We are very very early in this project. Expect bugs.
-
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
-
-## Documentation
-
-Full docs live in [docs/](./docs). There's no docs site yet.
-
-- [Install and first run](./docs/user/install.md)
-- [Permission modes](./docs/user/permission-modes.md)
-- [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Project settings](./docs/user/project-settings.md)
-- [Appearance preferences](./docs/user/appearance.md)
-- [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
-- [Source control integrations](./docs/user/source-control.md)
-- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- [Run T3 Code as a background service](./docs/user/background-service.md)
-
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
-
-## If you REALLY want to contribute still.... read this first
-
-### Install `vp`
-
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
-
-#### macOS / Linux
+Install Vite+ on macOS or Linux:
 
 ```bash
 curl -fsSL https://vite.plus | bash
 ```
 
-#### Windows
+On Windows, in PowerShell:
 
-```bash
+```powershell
 irm https://vite.plus/ps1 | iex
 ```
 
-Checkout their getting started guide for more information: https://viteplus.dev/guide/
-
-### Install dependencies
+From the repository root:
 
 ```bash
 vp i
+vp run dev --home-dir .t3/pi-gui
 ```
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
+For desktop development, use `vp run dev:desktop --home-dir .t3/pi-gui`. The explicit home directory keeps this checkout's runtime state separate from an installed T3 Code app. See [internal overview](./docs/internals/overview.md) for build details and [CONTRIBUTING.md](./CONTRIBUTING.md) for repository conventions.
 
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
+Upstream T3 Code installers, npm releases, and app-store downloads are not distributions of this fork. Use a build of this checkout when you want the Pi-only product.
 
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+## What carries over
+
+- **Pi configuration:** model discovery and thinking levels, custom model endpoints, user/project instructions, prompt templates, skills, and extensions supported in RPC mode.
+- **Native history:** native Pi v3 JSONL discovery and import are implemented. They respect `PI_CODING_AGENT_DIR` and read source sessions without modifying them; imported threads use the absolute JSONL path for resume, not the header UUID. Rollback and thread forks preserve native conversation boundaries. A complete native session picker, branch-tree browser, and Pi export workflow remain gaps.
+- **T3 workflows:** projects and worktrees, Git diffs and pull requests, integrated terminals, browser previews, attachments, and durable delegated child threads.
+- **Remote use:** a server-side Pi process can be controlled through the retained T3 clients. Credentials and workspace files stay with the server environment.
+
+Pi's terminal settings menu, session picker, and custom terminal extension components do not yet have complete graphical equivalents. The composer exposes native compaction, automatic compaction/retry, and queue-delivery controls; these execute Pi RPC operations rather than model prompts. Do not assume every Pi terminal built-in works in the composer. See the [graphical limitations](./docs/user/providers-pi.md#graphical-limitations) before relying on a native Pi workflow.
+
+Pi's automatic retry preference does not disable T3's Stop or steering controls. Turning retries off does not stop the current turn, and enabling them does not guarantee successful recovery. See [Native Pi controls](./docs/user/providers-pi.md#native-pi-controls) for usage.
+
+Pi keeps the three permission modes: **Supervised**, **Auto-accept edits**, and **Full access**. Extension policies are opt-in additions, not a fourth runtime mode or Pi's automatic retry setting. An arbitrary `/auto` command is not discovered as a policy. A plugin must register an extension command named `pi-desktop-policy-<id>` with a description starting with `pi-desktop-policy/v1:` followed by JSON metadata (`id`, `label`, `extensionName`, and optional `description`); the metadata ID must match the command suffix. Its handler accepts `<activate|deactivate> <requestId>` and must notify `PI_DESKTOP_POLICY_ACK:` followed by JSON containing the matching `requestId`, `policyId`, `action`, and boolean `success`. A handled command alone does not establish success; a negative ACK means the plugin rejected the transition.
+
+## Verify Pi integration
+
+`vp test run apps/server/src/provider/PiCommands.test.ts apps/server/src/orchestration-v2/Adapters/PiAdapterV2.test.ts` checks command routing and session behavior. Native discovery, transcript parsing, and import are covered by `apps/server/src/project/AgentSessionScanner.test.ts`, `apps/server/src/project/AgentSessionTranscript.test.ts`, and `apps/server/src/project/AgentSessionImporter.test.ts`. Pi-only registry behavior is covered by `apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts` and `apps/server/src/provider/AcpRegistryCatalog.test.ts`. With Pi 1.1.0 installed, `vp run test:pi-native` exercises the real RPC transport and reversible native preference updates in an isolated `.t3/pi-native-smoke/agent` directory. It does not send model prompts or require credentials. The Pi Core workflow is configured to run focused integration tests and this native smoke on Windows, macOS, and Linux; the matrix is not evidence that those platform runs have completed successfully.
+
+Run `node apps/server/scripts/pi-policy-native-smoke.ts` from the repository root for the offline extension-policy sidecar. It creates and cleans up its own temporary extension under `.t3/pi-policy-native-smoke`, disables extension autoload while explicitly loading that fixture, and uses an isolated agent directory and credential-free environment. It verifies native command metadata, opt-in discovery (excluding arbitrary `/auto`), activation/deactivation and negative ACKs, and absence of agent/model turns. The fixture changes only a session-local boolean, not settings. This transport-level smoke does not establish full graphical parity, production plugin behavior, or completed cross-platform verification.
+
+## User documentation
+
+- [Pi installation, authentication, sessions, and limitations](./docs/user/providers-pi.md)
+- [Composer](./docs/user/composer.md) and [thread sidebar](./docs/user/thread-sidebar.md)
+- [Project settings and worktrees](./docs/user/project-settings.md)
+- [Source control integrations](./docs/user/source-control.md)
+- [Integrated terminal](./docs/user/terminal.md)
+- [Remote access](./docs/user/remote-access.md)
+- [Appearance](./docs/user/appearance.md) and [keyboard shortcuts](./docs/user/keybindings.md)
+
+Some inherited guides still describe upstream multi-harness behavior. The Pi guide is authoritative for this fork's harness setup and permission behavior; other harness-specific guides are not setup instructions for this product.

@@ -28,6 +28,9 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import {
   defaultInstanceIdForDriver,
   PiSettings,
+  PI_RUNTIME_POLICY_OPTION_ID,
+  PI_RUNTIME_POLICY_ACK_PREFIX,
+  type ProviderRuntimePolicy,
   ProviderDriverKind,
   type ChatAttachment,
   type ModelSelection,
@@ -67,7 +70,10 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   expandPiSkillReference,
   parsePiCompactCommand,
+  parsePiControlCommand,
   parsePiDiscoveredCommands,
+  parsePiRuntimePolicies,
+  isPiRuntimePolicyCommand,
   type PiCompactCommand,
 } from "../../provider/PiCommands.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
@@ -81,6 +87,7 @@ import {
 } from "../ProviderAdapterDriver.ts";
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
+import { randomUuidV4 } from "../RandomUuid.ts";
 import {
   makePiRpcConnection,
   parsePiModelSlug,
@@ -95,7 +102,11 @@ import {
   materializePiT3McpExtension,
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
-import { PI_FILE_CHANGE_TOOLS } from "./piT3McpExtensionSource.ts";
+import {
+  PI_FILE_CHANGE_TOOLS,
+  PI_RUNTIME_POLICY_STATE_COMMAND,
+  PI_RUNTIME_POLICY_GUARD_ACK_PREFIX,
+} from "./piT3McpExtensionSource.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -110,6 +121,7 @@ const PI_INHERIT_MODEL_SLUG = "default";
 
 const STREAM_FLUSH_MS = 50;
 const PI_REQUEST_TIMEOUT_MS = 15_000;
+const decodePolicyAck = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 // Session lifecycle hooks reload extensions, MCP servers and language servers.
 const PI_SESSION_TIMEOUT_MS = 60_000;
 const PI_SKILL_DISCOVERY_TIMEOUT_MS = 4_000;
@@ -429,12 +441,14 @@ export function makePiAdapterV2(
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
+      const policyToken = yield* randomUuidV4;
       const launch = buildPiRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
         environment: options.environment,
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
+        policyToken,
       });
       const connection: PiRpcConnection = yield* makePiRpcConnection({
         command: options.settings.binaryPath || "pi",
@@ -485,6 +499,25 @@ export function makePiAdapterV2(
       // serialize the two paths to stop `turn.terminal` from overtaking the
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
+      const turnStartPermit = yield* Semaphore.make(1);
+      let activePolicy: ProviderRuntimePolicy | null = null;
+      let appliedRuntimeMode = input.runtimePolicy.runtimeMode;
+      let policyFailed = false;
+      let policyUiChanged = yield* Deferred.make<void>();
+      const signalPolicyUiChanged = Effect.fnUntraced(function* () {
+        const previous = policyUiChanged;
+        policyUiChanged = yield* Deferred.make<void>();
+        yield* Deferred.succeed(previous, undefined);
+      });
+      let policyAck: {
+        readonly prefix: string;
+        readonly requestId: string;
+        readonly policyId: string;
+        readonly action: "activate" | "deactivate";
+        readonly deferred: Deferred.Deferred<boolean>;
+        readonly response: Deferred.Deferred<boolean>;
+        readonly rpcRequestId: string;
+      } | null = null;
       let threadState: PiThreadState | null = null;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
@@ -598,6 +631,207 @@ export function makePiAdapterV2(
       const request = (record: PiRpcRecord, timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
         connection.request(record, timeoutMs);
 
+      const consumePolicyAck = Effect.fnUntraced(function* (event: PiRpcRecord) {
+        if (
+          event["type"] === "response" &&
+          event["id"] === policyAck?.rpcRequestId &&
+          policyAck !== null
+        ) {
+          yield* Deferred.succeed(policyAck.response, event["success"] === true);
+          return true;
+        }
+        if (event["type"] !== "extension_ui_request" || event["method"] !== "notify") return false;
+        const message = typeof event["message"] === "string" ? event["message"] : "";
+        const prefix = [PI_RUNTIME_POLICY_ACK_PREFIX, PI_RUNTIME_POLICY_GUARD_ACK_PREFIX].find(
+          (candidate) => message.startsWith(candidate),
+        );
+        if (prefix === undefined) return false;
+        const decoded = decodePolicyAck(message.slice(prefix.length));
+        if (Option.isNone(decoded)) return true;
+        const payload = decoded.value;
+        const pending = policyAck;
+        if (
+          pending !== null &&
+          pending.prefix === prefix &&
+          recordField(payload, "requestId") === pending.requestId &&
+          recordField(payload, "policyId") === pending.policyId &&
+          recordField(payload, "action") === pending.action &&
+          typeof recordField(payload, "success") === "boolean"
+        ) {
+          yield* Deferred.succeed(pending.deferred, recordField(payload, "success") === true);
+        } else if (
+          activePolicy !== null &&
+          typeof recordField(payload, "requestId") === "string" &&
+          ["activate", "deactivate"].includes(String(recordField(payload, "action"))) &&
+          typeof recordField(payload, "success") === "boolean" &&
+          ((prefix === PI_RUNTIME_POLICY_ACK_PREFIX &&
+            recordField(payload, "policyId") === activePolicy.id &&
+            (recordField(payload, "action") === "deactivate" ||
+              recordField(payload, "success") === false)) ||
+            (prefix === PI_RUNTIME_POLICY_GUARD_ACK_PREFIX &&
+              recordField(payload, "success") === true &&
+              recordField(payload, "policyId") !== activePolicy.id))
+        ) {
+          policyFailed = true;
+          yield* connection.terminate;
+        }
+        return true;
+      });
+
+      const dispatchPolicyCommand = Effect.fnUntraced(function* (
+        command: string,
+        policyId: string,
+        action: "activate" | "deactivate",
+        prefix: string,
+        args: (requestId: string) => string,
+      ) {
+        const deferred = yield* Deferred.make<boolean>();
+        const response = yield* Deferred.make<boolean>();
+        const requestId = yield* randomUuidV4;
+        const rpcRequestId = `pi-policy:${requestId}`;
+        policyAck = { prefix, requestId, policyId, action, deferred, response, rpcRequestId };
+        const deadline = Effect.gen(function* () {
+          while (true) {
+            const changed = policyUiChanged;
+            if (pendingPrompts.size > 0) yield* Deferred.await(changed);
+            else
+              yield* Deferred.await(changed).pipe(
+                Effect.timeoutOrElse({
+                  duration: PI_REQUEST_TIMEOUT_MS,
+                  orElse: () =>
+                    protocolError(`Pi runtime policy ${policyId} did not acknowledge ${action}`),
+                }),
+              );
+          }
+        });
+        const completion = Effect.all(
+          [deferred, response].map((completion) =>
+            Deferred.await(completion).pipe(
+              Effect.flatMap((success) =>
+                success
+                  ? Effect.void
+                  : protocolError(`Pi runtime policy ${policyId} rejected ${action}`),
+              ),
+            ),
+          ),
+          { concurrency: "unbounded" },
+        );
+        yield* connection
+          .send({ id: rpcRequestId, type: "prompt", message: `/${command} ${args(requestId)}` })
+          .pipe(
+            Effect.andThen(completion),
+            Effect.raceFirst(deadline),
+            Effect.ensuring(
+              Effect.sync(() => {
+                policyAck = null;
+              }),
+            ),
+          );
+      });
+
+      const setPolicyGuard = Effect.fnUntraced(function* (
+        mode: typeof appliedRuntimeMode,
+        policyId = "-",
+      ) {
+        const catalog = yield* request({ type: "get_commands" });
+        const commands = recordField(catalog, "commands");
+        const matches = Array.isArray(commands)
+          ? commands.filter(
+              (command) => recordField(command, "name") === PI_RUNTIME_POLICY_STATE_COMMAND,
+            )
+          : [];
+        if (matches.length !== 1 || recordField(matches[0], "source") !== "extension")
+          return yield* protocolError(
+            "Pi runtime policy guard is missing from the live extension catalog",
+          );
+        yield* dispatchPolicyCommand(
+          PI_RUNTIME_POLICY_STATE_COMMAND,
+          policyId,
+          policyId === "-" ? "deactivate" : "activate",
+          PI_RUNTIME_POLICY_GUARD_ACK_PREFIX,
+          (requestId) => `${policyToken} ${mode} ${policyId} ${requestId}`,
+        );
+      });
+
+      const applyRuntimePolicy = Effect.fnUntraced(function* (
+        selection: ModelSelection,
+        mode: typeof appliedRuntimeMode,
+      ) {
+        if (policyFailed)
+          return yield* protocolError("Pi runtime policy transition failed; restart the session");
+        const policyId = getModelSelectionStringOptionValue(selection, PI_RUNTIME_POLICY_OPTION_ID);
+        let nextPolicy: ProviderRuntimePolicy | null = null;
+        if (mode === "auto") {
+          if (policyId === undefined)
+            return yield* protocolError("Pi Auto requires an explicit runtime policy selection");
+          const catalog = yield* request({ type: "get_commands" });
+          nextPolicy =
+            parsePiRuntimePolicies(catalog).find((policy) => policy.id === policyId) ?? null;
+          if (nextPolicy === null)
+            return yield* protocolError(
+              "Selected Pi runtime policy is not declared in the live extension catalog",
+            );
+        }
+        if (
+          activePolicy !== null &&
+          nextPolicy?.id === activePolicy.id &&
+          nextPolicy.extensionName !== activePolicy.extensionName
+        )
+          return yield* protocolError(
+            "Selected Pi runtime policy declaration changed in the live catalog",
+          );
+        if (activePolicy?.id === nextPolicy?.id && appliedRuntimeMode === mode) return;
+        if (pendingWake !== null)
+          return yield* protocolError("Change Pi runtime policy after native work has finished");
+        yield* setPolicyGuard("auto");
+        if (activePolicy !== null) {
+          const catalog = yield* request({ type: "get_commands" });
+          const previous = parsePiRuntimePolicies(catalog).find(
+            (policy) => policy.id === activePolicy?.id,
+          );
+          if (
+            previous?.command !== activePolicy.command ||
+            previous.extensionName !== activePolicy.extensionName
+          )
+            return yield* protocolError(
+              "Active Pi runtime policy is missing from the live extension catalog",
+            );
+          yield* dispatchPolicyCommand(
+            previous.command,
+            previous.id,
+            "deactivate",
+            PI_RUNTIME_POLICY_ACK_PREFIX,
+            (requestId) => `deactivate ${requestId}`,
+          );
+          activePolicy = null;
+        }
+        if (nextPolicy !== null) {
+          const catalog = yield* request({ type: "get_commands" });
+          const live = parsePiRuntimePolicies(catalog).find(
+            (policy) => policy.id === nextPolicy?.id,
+          );
+          if (
+            live?.command !== nextPolicy.command ||
+            live.extensionName !== nextPolicy.extensionName
+          )
+            return yield* protocolError(
+              "Selected Pi runtime policy is missing from the live extension catalog",
+            );
+          yield* dispatchPolicyCommand(
+            nextPolicy.command,
+            nextPolicy.id,
+            "activate",
+            PI_RUNTIME_POLICY_ACK_PREFIX,
+            (requestId) => `activate ${requestId}`,
+          );
+          yield* setPolicyGuard("auto", nextPolicy.id);
+          activePolicy = nextPolicy;
+        } else {
+          yield* setPolicyGuard(mode);
+        }
+        appliedRuntimeMode = mode;
+      });
+
       const nonNegativeInteger = (input: unknown, key: string): number | undefined => {
         const value = recordNumber(input, key);
         return value === undefined ? undefined : Math.max(0, Math.trunc(value));
@@ -616,6 +850,11 @@ export function makePiAdapterV2(
 
       const lifecycleRequest = (record: PiRpcRecord) =>
         request(record, PI_SESSION_TIMEOUT_MS).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              activePolicy = null;
+            }),
+          ),
           // A local timeout does not cancel Pi's lifecycle hook. Retire the
           // process before fallback can race its eventual switch/new-session.
           Effect.tapError((error) =>
@@ -1199,6 +1438,7 @@ export function makePiAdapterV2(
         Effect.gen(function* () {
           const pending = Array.from(pendingPrompts.values());
           pendingPrompts.clear();
+          yield* signalPolicyUiChanged();
           yield* Effect.forEach(pending, (prompt) => cancelPrompt(prompt, resolvedAt), {
             discard: true,
           });
@@ -1339,6 +1579,7 @@ export function makePiAdapterV2(
           node,
           turnItem,
         });
+        yield* signalPolicyUiChanged();
         yield* emit({
           type: "runtime_request.updated",
           driver: PI_PROVIDER,
@@ -1442,7 +1683,6 @@ export function makePiAdapterV2(
       const finalizeTurn = Effect.fnUntraced(function* (state: PiThreadState, readUsage = true) {
         const turn = state.activeTurn;
         if (turn === null) return;
-        state.activeTurn = null;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
         if (turn.activeCompaction !== null) {
@@ -1469,6 +1709,7 @@ export function makePiAdapterV2(
         const tokenUsage = readUsage
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
+        state.activeTurn = null;
         const failure = turn.interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);
         yield* emit({
           type: "provider_turn.updated",
@@ -1794,6 +2035,8 @@ export function makePiAdapterV2(
           }
           case "auto_retry_start": {
             if (turn === null) return;
+            turn.settleProbeGeneration += 1;
+            turn.settleWhenIdle = false;
             const emittedAt = yield* DateTime.now;
             const attempt = Math.max(1, Math.trunc(recordNumber(event, "attempt") ?? 1));
             const maxAttempts = Math.max(
@@ -1880,6 +2123,7 @@ export function makePiAdapterV2(
               return;
             }
             if (turn !== null) {
+              if (turn.activeProviderRetry?.failure.retryable === true) return;
               turn.settleWhenIdle = true;
               turn.settleProbeGeneration += 1;
               // A wake can settle while the newly joined user prompt is still
@@ -2017,7 +2261,8 @@ export function makePiAdapterV2(
               turn.providerTurn.id !== event["providerTurnId"] ||
               turn.settleProbeGeneration !== event["settleProbeGeneration"] ||
               (!settleAfterAgentActivity && turn.sawAgentActivity) ||
-              turn.activeCompaction !== null
+              turn.activeCompaction !== null ||
+              turn.activeProviderRetry?.failure.retryable === true
             ) {
               return;
             }
@@ -2055,12 +2300,17 @@ export function makePiAdapterV2(
       yield* Effect.gen(function* () {
         while (true) {
           const event = yield* Queue.take(connection.events);
+          if (yield* consumePolicyAck(event)) continue;
           yield* sessionEventPermit.withPermits(1)(handleSessionEvent(event));
         }
       }).pipe(
         Effect.catchCause((cause) =>
           sessionEventPermit.withPermits(1)(
             Effect.gen(function* () {
+              if (policyAck !== null) {
+                yield* Deferred.succeed(policyAck.deferred, false);
+                yield* Deferred.succeed(policyAck.response, false);
+              }
               // Transport death finalizes any live turn. Stop-with-restart
               // closes the provider stream cleanly; only an unexpected death
               // is surfaced as an event-stream failure.
@@ -2156,6 +2406,7 @@ export function makePiAdapterV2(
           // Even a failed lifecycle operation can change Pi's native session.
           // Never leave the old app binding or model defaults usable afterward.
           threadState = null;
+          activePolicy = null;
           appliedModel = null;
           appliedThinking = null;
           appliedSessionName = null;
@@ -2417,6 +2668,10 @@ export function makePiAdapterV2(
           }),
         startTurn: (turnInput) =>
           Effect.gen(function* () {
+            if (isPiRuntimePolicyCommand(turnInput.message.text))
+              return yield* protocolError(
+                "Pi runtime policy commands are selector-only; choose a policy in the permission picker",
+              );
             if (rollbackBarrier !== null)
               return yield* protocolError("Cannot start a Pi turn during rollback");
             const state = threadState;
@@ -2439,7 +2694,34 @@ export function makePiAdapterV2(
             const continuation =
               turnInput.message.createdBy === "agent" &&
               turnInput.message.creationSource === "provider";
-            if (!continuation) yield* applySelection(turnInput.modelSelection);
+            const parsedControl = continuation
+              ? null
+              : parsePiControlCommand(turnInput.message.text);
+            if (parsedControl !== null && !parsedControl.ok) {
+              return yield* protocolError(parsedControl.message);
+            }
+            const controlCommand = parsedControl?.ok ? parsedControl.command : null;
+            if (controlCommand !== null && turnInput.message.attachments.length > 0) {
+              return yield* protocolError("Pi preference commands do not accept attachments");
+            }
+            if (controlCommand !== null && pendingWake !== null) {
+              return yield* protocolError(
+                "Change Pi preferences after the native turn has finished",
+              );
+            }
+            yield* applyRuntimePolicy(
+              turnInput.modelSelection,
+              turnInput.runtimePolicy.runtimeMode,
+            ).pipe(
+              Effect.tapError(() =>
+                Effect.sync(() => {
+                  policyFailed = true;
+                }).pipe(Effect.andThen(connection.terminate)),
+              ),
+              Effect.onInterrupt(() => connection.terminate),
+            );
+            if (!continuation && controlCommand === null)
+              yield* applySelection(turnInput.modelSelection);
             // Mirror the thread title into pi's session name so the session
             // stays identifiable in pi's own /resume listing. Best-effort:
             // naming must never block a turn.
@@ -2465,7 +2747,7 @@ export function makePiAdapterV2(
               ? null
               : parsePiCompactCommand(turnInput.message.text);
             const payload =
-              !continuation && compactCommand === null
+              !continuation && compactCommand === null && controlCommand === null
                 ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
                 : null;
             const startedAt = yield* DateTime.now;
@@ -2498,7 +2780,9 @@ export function makePiAdapterV2(
               sawAgentActivity: false,
               adoptedWake: false,
               promptMayBeCommandOnly:
-                compactCommand !== null || (payload?.message.trimStart().startsWith("/") ?? false),
+                compactCommand !== null ||
+                controlCommand !== null ||
+                (payload?.message.trimStart().startsWith("/") ?? false),
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
@@ -2564,7 +2848,27 @@ export function makePiAdapterV2(
                 lastRunOrdinal: turnInput.runOrdinal,
               });
               yield* updateProviderSession("running", null);
-              if (wake !== null) {
+              if (controlCommand !== null) {
+                yield* request(controlCommand.request).pipe(
+                  Effect.matchEffect({
+                    onSuccess: () =>
+                      handleExtensionUiRequest({
+                        method: "notify",
+                        message: controlCommand.label,
+                        notifyType: "info",
+                      }),
+                    onFailure: (cause) =>
+                      Effect.sync(() => {
+                        activeTurn.failure = makeProviderFailure({
+                          message: cause.message,
+                          class: "provider_error",
+                          retryable: false,
+                        });
+                      }),
+                  }),
+                );
+                yield* finalizeTurn(state, false);
+              } else if (wake !== null) {
                 for (const event of wake.events) {
                   if (!continuation && event["type"] === "agent_settled") {
                     activeTurn.settleWhenIdle = true;
@@ -2592,6 +2896,7 @@ export function makePiAdapterV2(
             // Rejections therefore return later as id-less response records
             // handled by the event pump.
           }).pipe(
+            turnStartPermit.withPermits(1),
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterTurnStartError({
@@ -2605,13 +2910,25 @@ export function makePiAdapterV2(
           ),
         steerTurn: (steerInput: ProviderAdapter.ProviderAdapterV2SteerInput) =>
           Effect.gen(function* () {
+            if (isPiRuntimePolicyCommand(steerInput.message.text))
+              return yield* protocolError(
+                "Pi runtime policy commands are selector-only; choose a policy in the permission picker",
+              );
             const turn = threadState?.activeTurn ?? null;
             if (turn === null || turn.providerTurn.id !== steerInput.providerTurnId) {
               return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
             }
             const compactCommand = parsePiCompactCommand(steerInput.message.text);
+            const parsedControl = parsePiControlCommand(steerInput.message.text);
+            if (parsedControl !== null && !parsedControl.ok) {
+              return yield* protocolError(parsedControl.message);
+            }
+            const controlCommand = parsedControl?.ok ? parsedControl.command : null;
+            if (controlCommand !== null && steerInput.message.attachments.length > 0) {
+              return yield* protocolError("Pi preference commands do not accept attachments");
+            }
             const payload =
-              compactCommand === null
+              compactCommand === null && controlCommand === null
                 ? yield* resolvePromptPayload(
                     steerInput.message.text,
                     steerInput.message.attachments,
@@ -2628,6 +2945,25 @@ export function makePiAdapterV2(
               Effect.gen(function* () {
                 if (threadState?.activeTurn !== turn) {
                   return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
+                }
+                if (controlCommand !== null) {
+                  yield* request(controlCommand.request).pipe(
+                    Effect.matchEffect({
+                      onSuccess: () =>
+                        handleExtensionUiRequest({
+                          method: "notify",
+                          message: controlCommand.label,
+                          notifyType: "info",
+                        }),
+                      onFailure: (cause) =>
+                        handleExtensionUiRequest({
+                          method: "notify",
+                          message: cause.message,
+                          notifyType: "error",
+                        }),
+                    }),
+                  );
+                  return;
                 }
                 if (compactCommand !== null) {
                   turn.manualCompactInFlight = true;
@@ -2664,6 +3000,15 @@ export function makePiAdapterV2(
           ),
         interruptTurn: (interruptInput) =>
           Effect.gen(function* () {
+            if (policyAck !== null) {
+              const pending = policyAck;
+              stopRequested = true;
+              policyFailed = true;
+              yield* sessionEventPermit.withPermits(1)(cancelPendingPrompts(yield* DateTime.now));
+              yield* Deferred.succeed(pending.deferred, false);
+              yield* connection.terminate;
+              return;
+            }
             const turn = threadState?.activeTurn ?? null;
             // Stop on a settled turn: Pi runs nothing between prompts, so
             // nothing of that turn is left to stop.
@@ -2676,35 +3021,31 @@ export function makePiAdapterV2(
               return yield* protocolError(`Pi turn ${interruptInput.providerTurnId} is not active`);
             }
             turn.interrupted = true;
+            const retireTurn = Effect.gen(function* () {
+              if (threadState?.activeTurn !== turn || stopRequested) return;
+              stopRequested = true;
+              if (
+                !turn.settleWhenIdle &&
+                turn.activeCompaction === null &&
+                !turn.manualCompactInFlight
+              ) {
+                yield* connection.send({ type: "abort" }).pipe(Effect.ignore);
+              }
+              if (turn.stopTreeRefs === undefined) {
+                turn.stopTreeRefs = yield* captureTurnTreeRefs(2_000);
+              }
+              yield* connection.terminate;
+            });
             if (
               interruptInput.requestRuntimeRestart === true ||
               turn.settleWhenIdle ||
               turn.activeCompaction !== null ||
               turn.manualCompactInFlight
             ) {
-              // Pi's generic abort does not cancel manual compaction. Terminate
-              // so Stop covers user /compact as well as detached recovery compact.
-              stopRequested = true;
-              if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
-                yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
-              }
-              // Terminating fails every later request, so read the stopped
-              // turn's session-tree refs first: rolling back past this turn
-              // forks at its user entry. Holding the event permit also lets a
-              // finalize that is already reading them finish before the kill.
-              yield* sessionEventPermit.withPermits(1)(
-                Effect.gen(function* () {
-                  if (threadState?.activeTurn === turn && turn.stopTreeRefs === undefined) {
-                    turn.stopTreeRefs = yield* captureTurnTreeRefs(2_000);
-                  }
-                  yield* connection.terminate;
-                }),
-              );
+              yield* retireTurn;
               return;
             }
-            yield* request({ type: "abort" }).pipe(
-              Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
-            );
+            yield* request({ type: "abort" }, 2_000).pipe(Effect.catch(() => retireTurn));
           }).pipe(
             Effect.mapError(
               (cause) =>
@@ -2733,6 +3074,7 @@ export function makePiAdapterV2(
             // Dropped only once Pi has the answer, so a failed send leaves the
             // request retryable and still cancellable during teardown.
             pendingPrompts.delete(String(requestInput.requestId));
+            yield* signalPolicyUiChanged();
             if (pending.method === "confirm" && requestInput.decision === "acceptForSession") {
               sessionApprovals.add(pending.approvalKey);
             }

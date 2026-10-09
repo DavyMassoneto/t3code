@@ -2,6 +2,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProjectId,
+  ProviderInstanceId,
   type ServerSettings,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -101,6 +102,47 @@ const checkout = resolveSettingsScope(
 );
 
 describe("scoped settings targets", () => {
+  it("keeps a materialized native global model inherited until a project override actually exists", () => {
+    const selection = { instanceId: ProviderInstanceId.make("pi"), model: "anthropic/native" };
+    const inherited = environment("Server", { settings: { defaultModelSelection: selection } });
+    const keys = ["defaultModelSelection"] as const;
+    const targets = resolveScopedSettingsTargets(checkout, [inherited]);
+    expect(targets[0]?.settings.defaultModelSelection).toEqual(selection);
+    expect(scopedSettingsSource(targets, keys)).toBe("environment");
+    expect(listProjectOverrides([inherited], keys)).toEqual([]);
+    expect(planScopedSettingsClear(named, [inherited], keys).serverWrites).toEqual([]);
+
+    const overridden = environment("Server", {
+      settings: {
+        defaultModelSelection: selection,
+        projectSettingsOverrides: {
+          [projectId]: { defaultModelSelection: selection, defaultAutoPull: true },
+        },
+      },
+    });
+    expect(scopedSettingsSource(resolveScopedSettingsTargets(checkout, [overridden]), keys)).toBe(
+      "project",
+    );
+    const plan = planScopedSettingsClear(checkout, [overridden], keys);
+    expect(plan.serverWrites).toEqual([
+      {
+        environmentId: overridden.environmentId,
+        label: overridden.label,
+        patch: { projectSettingsOverrides: { [projectId]: { defaultAutoPull: true } } },
+      },
+    ]);
+    const cleared = environment("Server", {
+      settings: applyServerSettingsPatch(
+        overridden.serverConfig!.settings,
+        plan.serverWrites[0]!.patch,
+      ),
+    });
+    const clearedTargets = resolveScopedSettingsTargets(checkout, [cleared]);
+    expect(clearedTargets[0]?.settings.defaultModelSelection).toEqual(selection);
+    expect(scopedSettingsSource(clearedTargets, keys)).toBe("environment");
+    expect(listProjectOverrides([cleared], keys)).toEqual([]);
+  });
+
   it("uses the named environment even when a different primary is available", () => {
     const selected = selectScopedSettingsEnvironments(named, environments, laptop.environmentId);
     expect(selected.environments).toEqual([server]);
@@ -148,6 +190,21 @@ describe("scoped settings targets", () => {
 });
 
 describe("scoped settings writes", () => {
+  it("routes real native model defaults through environment and project settings patches", () => {
+    const selection = { instanceId: ProviderInstanceId.make("pi"), model: "anthropic/native" };
+    expect(
+      planScopedSettingsPatch(named, environments, { defaultModelSelection: selection })
+        .serverWrites[0]?.patch,
+    ).toEqual({ defaultModelSelection: selection });
+    expect(
+      planScopedSettingsPatch(project, environments, {
+        defaultModelSelection: selection,
+      }).serverWrites.map((write) => write.patch),
+    ).toEqual([
+      { projectSettingsOverrides: { [projectId]: { defaultModelSelection: selection } } },
+      { projectSettingsOverrides: { [laptopProjectId]: { defaultModelSelection: selection } } },
+    ]);
+  });
   it("edits the effective machine policy without changing other machines' rules", () => {
     const custom = environment("Laptop", {
       settings: {

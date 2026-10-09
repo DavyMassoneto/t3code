@@ -24,6 +24,8 @@ vi.mock("@clerk/electron", () => ({
   createClerkBridge: createClerkBridgeMock,
 }));
 
+vi.mock("electron", () => ({ app: { setAsDefaultProtocolClient: vi.fn(() => true) } }));
+
 vi.mock("@clerk/electron/storage", () => ({
   storage: storageMock,
 }));
@@ -37,6 +39,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
+import * as Electron from "electron";
 
 const layerDesktopClerk = (
   isDevelopment = true,
@@ -50,12 +53,14 @@ const layerDesktopClerk = (
     openSystemSettings: () => Effect.succeed(false),
     copyText: () => Effect.void,
   },
+  suppressProtocolRegistration = false,
 ) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: "/tmp/t3-state",
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
     platform,
+    suppressProtocolRegistration,
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
   const electronApp = {
@@ -79,6 +84,25 @@ const layerDesktopClerk = (
 };
 
 describe("DesktopClerk", () => {
+  it.effect.each([true, false])(
+    "respects protocol suppression (%s) at bridge creation",
+    (suppressed) => {
+      const register = vi.mocked(Electron.app.setAsDefaultProtocolClient);
+      register.mockClear();
+      storageMock.mockReturnValue(storageAdapter);
+      createClerkBridgeMock.mockImplementation(() => {
+        Electron.app.setAsDefaultProtocolClient("pi-desktop");
+        return { cleanup: vi.fn(), isPrimaryInstance: true };
+      });
+      return Effect.gen(function* () {
+        yield* Effect.scoped(
+          Layer.build(layerDesktopClerk(false, [], "win32", undefined, undefined, suppressed)),
+        );
+        assert.equal(register.mock.calls.length, suppressed ? 0 : 1);
+        assert.strictEqual(Electron.app.setAsDefaultProtocolClient, register);
+      });
+    },
+  );
   beforeEach(() => {
     createClerkBridgeMock.mockReset();
     storageMock.mockReset();
@@ -101,7 +125,7 @@ describe("DesktopClerk", () => {
           {
             storage: storageAdapter,
             passkeys: true,
-            renderer: { scheme: "t3code-dev", host: "app" },
+            renderer: { scheme: "pi-desktop-dev", host: "app" },
           },
         ],
       ]);
@@ -109,7 +133,10 @@ describe("DesktopClerk", () => {
       // The bridge acquires Electron's single-instance lock at creation, and
       // the lock both lives in and creates the userData directory — so the
       // real path must be set before the bridge exists.
-      assert.deepEqual(events, ["setPath:userData:/tmp/app-data/t3code-dev", "createClerkBridge"]);
+      assert.deepEqual(events, [
+        "setPath:userData:/tmp/app-data/pi-desktop-dev",
+        "createClerkBridge",
+      ]);
       storageMock.mockClear();
       createClerkBridgeMock.mockClear();
     });
@@ -120,13 +147,13 @@ describe("DesktopClerk", () => {
       name: "packaged Windows",
       isDevelopment: false,
       platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-v2",
+      userData: "/tmp/app-data/pi-desktop",
     },
     {
       name: "development",
       isDevelopment: true,
       platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-dev",
+      userData: "/tmp/app-data/pi-desktop-dev",
     },
   ])(
     "creates the bridge before startup can yield to the event loop ($name)",
@@ -280,19 +307,19 @@ it.effect(
       const clerk = yield* DesktopClerk.DesktopClerk;
       yield* clerk.configure;
       const event = { preventDefault: vi.fn() };
-      listeners.get("open-url")!(event, "t3code-dev://app/auth/callback?code=clerk-code");
-      listeners.get("open-url")!(event, "t3code://app/welcome");
+      listeners.get("open-url")!(event, "pi-desktop-dev://app/auth/callback?code=clerk-code");
+      listeners.get("open-url")!(event, "pi-desktop://app/welcome");
       assert.equal(loadURL.mock.calls.length, 0);
       assert.equal(event.preventDefault.mock.calls.length, 0);
       listeners.get("second-instance")!({}, [
         "t3",
-        "t3code-dev://app/settings/providers?instanceId=work&code=never-forward",
+        "pi-desktop-dev://app/settings/providers?instanceId=work&code=never-forward",
       ]);
       yield* Effect.promise(() => revealed.promise);
       assert.deepEqual(loadURL.mock.calls, [
-        ["t3code-dev://app/settings/providers?instanceId=work"],
+        ["pi-desktop-dev://app/settings/providers?instanceId=work"],
       ]);
-      listeners.get("open-url")!(event, "t3code-dev://app/welcome#agents:machine-id");
+      listeners.get("open-url")!(event, "pi-desktop-dev://app/welcome#agents:machine-id");
       assert.equal(event.preventDefault.mock.calls.length, 1);
     }).pipe(
       Effect.scoped,

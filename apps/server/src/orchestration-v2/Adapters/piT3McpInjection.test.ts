@@ -88,7 +88,7 @@ describe("pi T3 MCP injection", () => {
     assert.equal(permissionOnly.env[T3_PI_RUNTIME_MODE_ENV], "auto-accept-edits");
   });
 
-  it("falls back to Pi's first supported mode for legacy auto threads", () => {
+  it("keeps auto fail-closed until the adapter confirms a selected extension policy", () => {
     const launch = buildPiRpcLaunch({
       launchArgs: [],
       environment: {},
@@ -97,7 +97,7 @@ describe("pi T3 MCP injection", () => {
       runtimeMode: "auto",
     });
 
-    assert.equal(launch.env[T3_PI_RUNTIME_MODE_ENV], "approval-required");
+    assert.equal(launch.env[T3_PI_RUNTIME_MODE_ENV], "auto");
   });
 
   it("forces tools and user extensions off for unattended text generation", () => {

@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
+import { suppressProtocolRegistration } from "../app/DesktopConfig.ts";
 
 export interface ElectronAppMetadata {
   readonly appVersion: string;
@@ -166,7 +167,8 @@ export const make = ElectronApp.of({
     }),
   getAppMetrics: Effect.sync(() => Electron.app.getAppMetrics()),
   setAsDefaultProtocolClient: (protocol, path, args) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      if (yield* suppressProtocolRegistration.pipe(Effect.orDie)) return false;
       if (path === undefined) {
         return Electron.app.setAsDefaultProtocolClient(protocol);
       }

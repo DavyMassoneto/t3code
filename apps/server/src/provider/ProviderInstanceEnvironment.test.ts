@@ -22,6 +22,7 @@ describe("mergeProviderInstanceEnvironment", () => {
         [
           { name: "CODEX_HOME", value, sensitive: false },
           { name: "CLAUDE_CONFIG_DIR", value, sensitive: false },
+          { name: "PI_CODING_AGENT_DIR", value, sensitive: false },
           { name: "CUSTOM_VALUE", value, sensitive: false },
         ],
         baseEnv,
@@ -30,6 +31,7 @@ describe("mergeProviderInstanceEnvironment", () => {
       expect(environment).toEqual({
         CODEX_HOME: path.join(NodeOS.homedir(), tail),
         CLAUDE_CONFIG_DIR: path.join(NodeOS.homedir(), tail),
+        PI_CODING_AGENT_DIR: value,
         CUSTOM_VALUE: value,
       });
       expect(baseEnv).toEqual({
@@ -40,7 +42,11 @@ describe("mergeProviderInstanceEnvironment", () => {
   );
 
   it("leaves inherited provider homes unchanged", () => {
-    const baseEnv = { CODEX_HOME: "~/.codex", CLAUDE_CONFIG_DIR: "~\\.claude" };
+    const baseEnv = {
+      CODEX_HOME: "~/.codex",
+      CLAUDE_CONFIG_DIR: "~\\.claude",
+      PI_CODING_AGENT_DIR: "~/.pi-instance",
+    };
 
     expect(
       mergeProviderInstanceEnvironment(
@@ -49,6 +55,30 @@ describe("mergeProviderInstanceEnvironment", () => {
       ),
     ).toEqual({ ...baseEnv, CUSTOM_VALUE: "~/.custom" });
   });
+
+  it.each(["HOME", "USERPROFILE"])(
+    "preserves the raw Pi directory independently of %s override ordering",
+    (homeVariable) => {
+      const home = { name: homeVariable, value: "instance-home", sensitive: false };
+      for (const value of ["~/pi-instance", "~\\pi-instance", "~", ""]) {
+        const pi = { name: "PI_CODING_AGENT_DIR", value, sensitive: false };
+        for (const variables of [
+          [home, pi],
+          [pi, home],
+        ]) {
+          expect(
+            mergeProviderInstanceEnvironment(variables, {
+              [homeVariable]: "parent-home",
+              PI_CODING_AGENT_DIR: "inherited",
+            }),
+          ).toEqual({
+            [homeVariable]: "instance-home",
+            PI_CODING_AGENT_DIR: value,
+          });
+        }
+      }
+    },
+  );
 
   it("overrides inherited environment values and preserves empty strings", () => {
     expect(

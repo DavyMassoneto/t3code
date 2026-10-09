@@ -84,6 +84,16 @@ const makePiSpawner = Effect.gen(function* () {
                             },
                           },
                           { name: `prompt-${cwd?.slice(1)}`, source: "prompt" },
+                          ...(cwd === "/first"
+                            ? [
+                                {
+                                  name: "pi-desktop-policy-project-auto",
+                                  source: "extension",
+                                  description:
+                                    'pi-desktop-policy/v1:{"id":"project-auto","label":"Project Auto","extensionName":"project"}',
+                                },
+                              ]
+                            : []),
                         ]),
                   ],
                 }
@@ -141,16 +151,30 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
       );
       assert.deepEqual(
         first.slashCommands.map((command) => command.name),
-        ["compact", "prompt-first"],
+        [
+          "compact",
+          "pi-auto-compaction",
+          "pi-auto-retry",
+          "pi-steering-mode",
+          "pi-follow-up-mode",
+          "prompt-first",
+        ],
       );
       const machine = yield* instance.snapshot.getSnapshot;
+      assert.deepEqual(
+        first.runtimePolicies?.map((policy) => policy.id),
+        ["project-auto"],
+      );
+      assert.deepEqual(second.runtimePolicies, []);
+      assert.deepEqual(machine.runtimePolicies, []);
+      assert.isFalse(launches.some((launch) => launch.args.includes("--extension")));
       assert.deepEqual(
         machine.skills.map((skill) => skill.name),
         ["personal"],
       );
       assert.deepEqual(
         machine.slashCommands.map((command) => command.name),
-        ["compact"],
+        ["compact", "pi-auto-compaction", "pi-auto-retry", "pi-steering-mode", "pi-follow-up-mode"],
       );
       assert.equal(first.instanceId, instance.instanceId);
       assert.equal(first.displayName, "My Pi");

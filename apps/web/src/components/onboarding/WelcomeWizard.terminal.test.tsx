@@ -108,6 +108,10 @@ vi.mock("../../hooks/useLocalStorage", () => ({ useLocalStorage: () => [false, v
 vi.mock("../../hooks/useCopyToClipboard", () => ({
   useCopyToClipboard: () => ({ copyToClipboard: vi.fn(), isCopied: false }),
 }));
+vi.mock("../settings/ProviderAuthenticationSection", () => ({
+  ProviderAuthenticationSection: () => null,
+}));
+
 vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
 vi.mock("../clerk/useT3ConnectAuthPrompt", () => ({ useT3ConnectAuthPrompt: vi.fn() }));
 vi.mock("@clerk/react", () => ({ useAuth: vi.fn() }));
@@ -173,9 +177,9 @@ const remoteEnvironment = {
     }),
   },
 } as const;
-const missingClaude: ServerProvider = {
-  instanceId: ProviderInstanceId.make("claude-work"),
-  driver: ProviderDriverKind.make("claudeAgent"),
+const missingPi: ServerProvider = {
+  instanceId: ProviderInstanceId.make("pi-install"),
+  driver: ProviderDriverKind.make("pi"),
   enabled: true,
   installed: false,
   version: null,
@@ -186,10 +190,10 @@ const missingClaude: ServerProvider = {
   slashCommands: [],
   skills: [],
 };
-const signedOutCodex: ServerProvider = {
-  ...missingClaude,
-  instanceId: ProviderInstanceId.make("codex-work"),
-  driver: ProviderDriverKind.make("codex"),
+const signedOutPi: ServerProvider = {
+  ...missingPi,
+  instanceId: ProviderInstanceId.make("pi-work"),
+  driver: ProviderDriverKind.make("pi"),
   installed: true,
   auth: { status: "unauthenticated" },
 };
@@ -257,9 +261,7 @@ beforeEach(() => {
     );
     state.providers.set(
       id,
-      Atom.make<ReadonlyArray<ServerProvider>>([missingClaude, signedOutCodex]).pipe(
-        Atom.keepAlive,
-      ),
+      Atom.make<ReadonlyArray<ServerProvider>>([missingPi, signedOutPi]).pipe(Atom.keepAlive),
     );
     state.configs.set(
       id,
@@ -268,9 +270,9 @@ beforeEach(() => {
         settings: {
           ...DEFAULT_SERVER_SETTINGS,
           providerInstances: {
-            [signedOutCodex.instanceId]: {
-              driver: signedOutCodex.driver,
-              config: { binaryPath: "/opt/codex-work", setupMode: "existing" },
+            [signedOutPi.instanceId]: {
+              driver: signedOutPi.driver,
+              config: { binaryPath: "/opt/pi-work", setupMode: "existing" },
             },
           },
         },
@@ -337,7 +339,7 @@ describe("welcome agent terminal setup", () => {
         threadId: "onboarding-agent-setup",
         terminalId: expect.any(String),
         cwd: "/fixtures/paired-remote",
-        providerInstanceId: missingClaude.instanceId,
+        providerInstanceId: missingPi.instanceId,
       },
     });
     expect(state.write).toHaveBeenCalledExactlyOnceWith({
@@ -345,7 +347,7 @@ describe("welcome agent terminal setup", () => {
       input: {
         threadId: "onboarding-agent-setup",
         terminalId: state.open.mock.calls[0]![0].input.terminalId,
-        data: "curl -fsSL https://claude.ai/install.sh | bash",
+        data: "npm install -g @earendil-works/pi-coding-agent",
       },
     });
     expect(hasViewport()).toBe(true);
@@ -370,7 +372,7 @@ describe("welcome agent terminal setup", () => {
         threadId: "onboarding-agent-setup",
         terminalId: expect.any(String),
         cwd: "/fixtures/paired-remote",
-        providerInstanceId: signedOutCodex.instanceId,
+        providerInstanceId: signedOutPi.instanceId,
       },
     });
     expect(state.write).toHaveBeenCalledExactlyOnceWith({
@@ -378,7 +380,7 @@ describe("welcome agent terminal setup", () => {
       input: {
         threadId: "onboarding-agent-setup",
         terminalId: state.open.mock.calls[0]![0].input.terminalId,
-        data: "/opt/codex-work login",
+        data: "/opt/pi-work",
       },
     });
     expect(text(renderer!.root)).toContain("Review the command, then press Enter to run it.");
@@ -424,7 +426,7 @@ describe("welcome agent terminal setup", () => {
     expect(state.open).toHaveBeenCalledOnce();
     expect(state.write).not.toHaveBeenCalled();
     expect(text(renderer!.root)).toContain(
-      "Run curl -fsSL https://claude.ai/install.sh | bash in this",
+      "Run npm install -g @earendil-works/pi-coding-agent in this",
     );
     await act(async () => setAccess(remoteId, false));
     await click("Close");

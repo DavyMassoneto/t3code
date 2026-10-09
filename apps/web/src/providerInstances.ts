@@ -24,6 +24,7 @@ import {
   type ServerSettings,
   type ServerProviderState,
 } from "@t3tools/contracts";
+import { isInteractiveProvider } from "@t3tools/client-runtime/provider-policy";
 import {
   normalizeProviderAccentColor,
   resolveProviderInstanceDisplayName,
@@ -31,6 +32,17 @@ import {
 } from "@t3tools/client-runtime/state/provider-instance-display";
 
 export { normalizeProviderAccentColor, shouldShowInstanceBadge };
+
+export function isLegacyPiDefaultModel(model: string | null | undefined): boolean {
+  const normalized = model?.trim().toLowerCase();
+  return normalized === "default" || normalized === "pi-default";
+}
+
+export function getNativePiDefaultModel(
+  models: ReadonlyArray<Pick<ServerProviderModel, "slug" | "isDefault">>,
+): string | undefined {
+  return models.find((model) => model.isDefault && !isLegacyPiDefaultModel(model.slug))?.slug;
+}
 
 /**
  * Local-only placeholder used while a draft has no provider it can safely
@@ -103,7 +115,7 @@ export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boo
 
 /** Picker rails contain configured, enabled instances only. */
 export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): boolean {
-  return entry.enabled;
+  return isInteractiveProvider(entry.driverKind) && entry.enabled;
 }
 
 /**
@@ -272,8 +284,8 @@ export function getProviderInstanceEntry(
 }
 
 /**
- * Default model slug for a specific instance: its declared built-in default,
- * then its first built-in model, then any model it reports, then the driver-level default. Custom
+ * Pi uses only its marked native default. Other drivers use their declared built-in default,
+ * then their first built-in model, then any model they report, then the driver-level default. Custom
  * instances can serve a different model list than the default instance of
  * the same driver kind, so the lookup must be instance-scoped rather than
  * kind-scoped.
@@ -284,11 +296,12 @@ export function getDefaultProviderInstanceModel(
 ): string | undefined {
   const entry = getProviderInstanceEntry(providers, instanceId);
   if (!entry) return undefined;
+  if (entry.driverKind === "pi") return getNativePiDefaultModel(entry.models);
   return (
     entry.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
     entry.models.find((model) => !model.isCustom)?.slug ??
     entry.models[0]?.slug ??
-    DEFAULT_MODEL_BY_PROVIDER[entry.driverKind]
+    (entry.driverKind === "pi" ? undefined : DEFAULT_MODEL_BY_PROVIDER[entry.driverKind])
   );
 }
 
@@ -334,7 +347,8 @@ export function resolveSelectableProviderInstance(
 
 /**
  * Resolve the model selection persisted for a project or new thread. A valid
- * stored selection is preserved byte-for-byte. Falling back to another
+ * stored selection is preserved byte-for-byte except legacy Pi default markers,
+ * which resolve to the marked native model. Falling back to another
  * instance also resets the model to that instance's own default, avoiding
  * cross-provider instance/model pairs.
  */
@@ -342,9 +356,22 @@ export function resolveDefaultProviderModelSelection(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null | undefined,
 ): ModelSelection | null {
-  const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId);
+  const selectableProviders = providers.filter((provider) =>
+    isInteractiveProvider(provider.driver),
+  );
+  const instanceId = resolveSelectableProviderInstance(selectableProviders, selection?.instanceId);
   if (instanceId === undefined) return null;
-  if (selection?.instanceId === instanceId) return selection;
-  const model = getDefaultProviderInstanceModel(providers, instanceId);
+  if (selection?.instanceId === instanceId) {
+    const entry = getProviderInstanceEntry(selectableProviders, instanceId);
+    if (
+      entry?.driverKind !== "pi" ||
+      (selection.model && !isLegacyPiDefaultModel(selection.model))
+    ) {
+      return selection;
+    }
+    const model = getNativePiDefaultModel(entry.models);
+    return model ? { ...selection, model } : null;
+  }
+  const model = getDefaultProviderInstanceModel(selectableProviders, instanceId);
   return model ? { instanceId, model } : null;
 }

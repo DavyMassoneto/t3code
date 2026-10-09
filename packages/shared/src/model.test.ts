@@ -27,6 +27,39 @@ it("keeps the Codex catalog display formatting", () => {
   expect(formatCodexModelName("GPT Test")).toBe("GPT Test");
 });
 
+it("preserves the reserved Pi runtime policy independently of model capabilities without retaining arbitrary unknown options", () => {
+  const selections = [
+    { id: "piRuntimePolicy", value: "review" },
+    { id: "unknown", value: "drop" },
+  ];
+  expect(buildExplicitProviderOptionSelectionsFromDescriptors([], selections)).toEqual([
+    selections[0],
+  ]);
+  expect(buildExplicitProviderOptionSelectionsFromDescriptors(undefined, selections)).toEqual([
+    selections[0],
+  ]);
+  expect(
+    buildExplicitProviderOptionSelectionsFromDescriptors(
+      [
+        {
+          id: "piRuntimePolicy",
+          type: "select",
+          label: "Not a model trait",
+          currentValue: "other",
+          options: [{ id: "other", label: "Other" }],
+        },
+      ],
+      selections,
+    ),
+  ).toEqual([selections[0]]);
+});
+
+it("preserves Pi model IDs by default while retaining explicit legacy aliases", () => {
+  expect(normalizeModelSlug("5.4")).toBe("5.4");
+  expect(normalizeModelSlug("openai/gpt-5.4")).toBe("openai/gpt-5.4");
+  expect(normalizeModelSlug("5.4", ProviderDriverKind.make("codex"))).toBe("gpt-5.4");
+});
+
 it.each([
   ["gpt-5.4", "GPT-5.4"],
   ["claude-opus-4-6", "Claude Opus 4.6"],

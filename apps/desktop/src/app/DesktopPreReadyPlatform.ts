@@ -13,6 +13,7 @@ import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
 import { renderUrlHandlerDesktopEntry } from "./DesktopLinuxUrlHandler.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
+import { suppressProtocolRegistration } from "./DesktopConfig.ts";
 
 export interface DesktopPreReadyCommandLineReader {
   readonly hasSwitch: (switchName: string) => boolean;
@@ -51,6 +52,7 @@ export class DesktopPreReadyElectronOptions extends Context.Service<
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const platform = yield* HostProcessPlatform;
+  const suppressRegistration = yield* suppressProtocolRegistration.pipe(Effect.orDie);
   return yield* Effect.sync((): DesktopPreReadyElectronOptions["Service"] => {
     const linuxPasswordStoreCommandLine =
       platform === "linux"
@@ -62,47 +64,49 @@ export const make = Effect.gen(function* () {
       // The portal also requires a valid desktop entry. An AppImage update may
       // have removed the executable referenced by the previous launch's entry.
       try {
-        const applicationsDir = NodePath.posix.join(
-          process.env.XDG_DATA_HOME?.trim() ||
-            NodePath.posix.join(NodeOS.homedir(), ".local", "share"),
-          "applications",
-        );
-        NodeFS.mkdirSync(applicationsDir, { recursive: true });
-        const iconPath = Electron.app.isPackaged
-          ? NodePath.posix.join(
-              applicationsDir,
-              "..",
-              "icons",
-              `${linux.linuxDesktopEntryName}.png`,
-            )
-          : undefined;
-        if (iconPath !== undefined) {
-          try {
-            NodeFS.mkdirSync(NodePath.posix.dirname(iconPath), { recursive: true });
-            NodeFS.copyFileSync(
-              NodePath.posix.join(
-                Electron.app.getAppPath(),
-                "apps/desktop/prod-resources/icon.png",
-              ),
-              iconPath,
-            );
-          } catch {
-            // Icon installation is optional; registration retries after readiness.
+        if (!suppressRegistration) {
+          const applicationsDir = NodePath.posix.join(
+            process.env.XDG_DATA_HOME?.trim() ||
+              NodePath.posix.join(NodeOS.homedir(), ".local", "share"),
+            "applications",
+          );
+          NodeFS.mkdirSync(applicationsDir, { recursive: true });
+          const iconPath = Electron.app.isPackaged
+            ? NodePath.posix.join(
+                applicationsDir,
+                "..",
+                "icons",
+                `${linux.linuxDesktopEntryName}.png`,
+              )
+            : undefined;
+          if (iconPath !== undefined) {
+            try {
+              NodeFS.mkdirSync(NodePath.posix.dirname(iconPath), { recursive: true });
+              NodeFS.copyFileSync(
+                NodePath.posix.join(
+                  Electron.app.getAppPath(),
+                  "apps/desktop/prod-resources/icon.png",
+                ),
+                iconPath,
+              );
+            } catch {
+              // Icon installation is optional; registration retries after readiness.
+            }
           }
+          NodeFS.writeFileSync(
+            NodePath.posix.join(applicationsDir, linux.linuxDesktopEntryName),
+            renderUrlHandlerDesktopEntry({
+              displayName: resolveDesktopAppBranding({
+                isDevelopment: linux.isDevelopment,
+                appVersion: Electron.app.getVersion(),
+              }).displayName,
+              execTarget: process.env.APPIMAGE?.trim() || process.execPath,
+              scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),
+              ...(iconPath === undefined ? {} : { iconPath }),
+            }),
+            "utf8",
+          );
         }
-        NodeFS.writeFileSync(
-          NodePath.posix.join(applicationsDir, linux.linuxDesktopEntryName),
-          renderUrlHandlerDesktopEntry({
-            displayName: resolveDesktopAppBranding({
-              isDevelopment: linux.isDevelopment,
-              appVersion: Electron.app.getVersion(),
-            }).displayName,
-            execTarget: process.env.APPIMAGE?.trim() || process.execPath,
-            scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),
-            ...(iconPath === undefined ? {} : { iconPath }),
-          }),
-          "utf8",
-        );
       } catch {
         // The URL handler retries with the full environment and logs failures.
       }

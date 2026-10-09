@@ -754,7 +754,7 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
     expect(decoded.providerInstances).toEqual({});
     // Legacy `providers` struct is still hydrated with its per-driver defaults
     // so existing call sites keep working through the migration.
-    expect(decoded.providers.codex.enabled).toBe(true);
+    expect(decoded.providers.codex.enabled).toBe(false);
   });
 
   it("decodes a multi-instance map mixing first-party and fork drivers", () => {
@@ -811,13 +811,33 @@ describe("provider enabled defaults", () => {
     ).toBe(false);
   });
 
-  it("enables only the stable bindings by default", () => {
+  it("enables only Pi by default and delegates model choice to Pi", () => {
     const decoded = decodeServerSettings({});
-    expect(decoded.providers.codex.enabled).toBe(true);
-    expect(decoded.providers.claudeAgent.enabled).toBe(true);
-    expect(decoded.providers.cursor.enabled).toBe(false);
-    expect(decoded.providers.grok.enabled).toBe(false);
-    expect(decoded.providers.opencode.enabled).toBe(false);
+    expect(
+      Object.entries(decoded.providers)
+        .filter(([, provider]) => provider.enabled)
+        .map(([driver]) => driver),
+    ).toEqual(["pi"]);
+    expect(decoded.textGenerationModelSelection).toEqual({ instanceId: "pi", model: "default" });
+  });
+
+  it("round-trips explicit legacy enablement and model selections without migration", () => {
+    const input = {
+      providers: {
+        codex: { enabled: true, homePath: "~/.codex-work" },
+        claudeAgent: { enabled: true },
+        pi: { enabled: false },
+      },
+      providerInstances: {
+        legacy: { driver: "codex", enabled: true, config: { arbitrary: "preserved" } },
+      },
+      textGenerationModelSelection: {
+        instanceId: "legacy",
+        model: "legacy-model",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
   });
 
   it("keeps Cursor enabled when an existing user explicitly opted in", () => {
@@ -839,7 +859,10 @@ describe("provider enabled defaults", () => {
     const codex = ProviderDriverKind.make("codex");
     // No flags anywhere: driver default applies.
     expect(resolveProviderInstanceEnabled({ driver: grok, config: {} })).toBe(false);
-    expect(resolveProviderInstanceEnabled({ driver: codex, config: {} })).toBe(true);
+    expect(resolveProviderInstanceEnabled({ driver: codex, config: {} })).toBe(false);
+    expect(
+      resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make("pi"), config: {} }),
+    ).toBe(true);
     // Unknown fork drivers stay enabled.
     expect(
       resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make("ollama"), config: {} }),

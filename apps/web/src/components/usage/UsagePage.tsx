@@ -134,6 +134,7 @@ export function UsagePage() {
   const showingLimits = metric === "limits";
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [limitsNow, setLimitsNow] = useState(() => Date.now());
+  const [limitsRefreshToken, setLimitsRefreshToken] = useState(0);
   const refreshingRef = useRef(false);
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
   const [priceDialog, setPriceDialog] = useState<{ readonly model?: string } | null>(null);
@@ -336,6 +337,7 @@ export function UsagePage() {
     if (showingLimits) {
       refreshingRef.current = true;
       setIsRefreshing(true);
+      setLimitsRefreshToken((token) => token + 1);
       void refreshLimits().finally(() => {
         refreshingRef.current = false;
         setIsRefreshing(false);
@@ -540,6 +542,7 @@ export function UsagePage() {
               </p>
             ) : showingLimits ? (
               <UsageLimitsSection
+                refreshToken={limitsRefreshToken}
                 selectedEnvironmentIds={selectedEnvironmentIds}
                 hiddenProviders={hiddenProviders}
                 now={limitsNow}

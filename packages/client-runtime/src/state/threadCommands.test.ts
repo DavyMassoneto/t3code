@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
+  RunId,
   RuntimeRequestId,
   EnvironmentId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -24,6 +26,7 @@ import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
+import { acquireComposerSend, acknowledgeComposerSend } from "./composerDispatch.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
 const THREAD_ID = ThreadId.make("thread");
@@ -125,6 +128,86 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
 });
 
 describe("remote thread lifecycle commands", () => {
+  it.live(
+    "sends a new Pi message after durable acknowledgment while the old reply is pending",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const inFlight = { current: false };
+        const firstId = MessageId.make("first-pi-message");
+        const nextId = MessageId.make("next-pi-message");
+        const firstReceipt = acquireComposerSend(inFlight, firstId)!;
+        const send = (messageId: MessageId) =>
+          harness.commands.startTurn.run(harness.registry, {
+            environmentId: ENVIRONMENT_ID,
+            input: {
+              threadId: THREAD_ID,
+              message: { messageId, role: "user", text: "Continue", attachments: [] },
+              modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "pi-default" },
+              dispatchMode: "start",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
+          });
+        const first = send(firstId);
+        const pendingFirst = yield* Queue.take(harness.requests);
+        expect(acquireComposerSend(inFlight, nextId)).toBeNull();
+        expect(acknowledgeComposerSend(inFlight, new Set([firstId]))).toBe(true);
+        const nextReceipt = acquireComposerSend(inFlight, nextId)!;
+        expect(nextReceipt).not.toBeNull();
+        const next = send(nextId);
+        const pendingNext = yield* Queue.take(harness.requests).pipe(Effect.timeout("1 second"));
+        expect(pendingNext.command).toMatchObject({ type: "message.dispatch", messageId: nextId });
+        yield* Deferred.fail(pendingFirst.reply, new Error("Old reply lost after commit"));
+        expect((yield* Effect.promise(() => first))._tag).toBe("Failure");
+        expect(firstReceipt.wasAcknowledged()).toBe(true);
+        firstReceipt.release();
+        expect(inFlight.current).toBe(true);
+        yield* Deferred.succeed(pendingNext.reply, { sequence: 3 });
+        expect((yield* Effect.promise(() => next))._tag).toBe("Success");
+        nextReceipt.release();
+        expect(inFlight.current).toBe(false);
+      }),
+  );
+
+  it.live("interrupts a Pi run before an outstanding send receipt resolves", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const send = harness.commands.startTurn.run(harness.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: {
+          threadId: THREAD_ID,
+          message: {
+            messageId: MessageId.make("pi-message"),
+            role: "user",
+            text: "Continue",
+            attachments: [],
+          },
+          modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "pi-default" },
+          dispatchMode: "start",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        },
+      });
+      const pendingSend = yield* Queue.take(harness.requests);
+      expect(pendingSend.command.type).toBe("message.dispatch");
+      const interrupt = harness.commands.interruptTurn.run(harness.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID, runId: RunId.make("pi-run") },
+      });
+      const pendingInterrupt = yield* Queue.take(harness.requests).pipe(Effect.timeout("1 second"));
+      expect(pendingInterrupt.command).toMatchObject({
+        type: "run.interrupt",
+        runId: "pi-run",
+        holdQueue: true,
+      });
+      yield* Deferred.succeed(pendingInterrupt.reply, { sequence: 3 });
+      expect((yield* Effect.promise(() => interrupt))._tag).toBe("Success");
+      yield* Deferred.succeed(pendingSend.reply, { sequence: 2 });
+      expect((yield* Effect.promise(() => send))._tag).toBe("Success");
+    }),
+  );
+
   const actions = [
     ["settle", {}, { settledOverride: "settled", pinnedAt: null, snoozedUntil: null }],
     ["unsettle", { reason: "user" }, { settledOverride: "active", settledAt: null }],

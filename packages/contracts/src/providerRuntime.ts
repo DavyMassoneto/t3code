@@ -17,6 +17,20 @@ import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderUsageLimitsUpdate } from "./providerUsageLimits.ts";
 import { ProviderApprovalOption } from "./providerPolicy.ts";
 
+export const PI_RUNTIME_POLICY_OPTION_ID = "piRuntimePolicy";
+export const PI_RUNTIME_POLICY_COMMAND_PREFIX = "pi-desktop-policy-";
+export const PI_RUNTIME_POLICY_METADATA_PREFIX = "pi-desktop-policy/v1:";
+export const PI_RUNTIME_POLICY_ACK_PREFIX = "PI_DESKTOP_POLICY_ACK:";
+
+export const ProviderRuntimePolicy = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  label: TrimmedNonEmptyString,
+  description: Schema.optional(TrimmedNonEmptyString),
+  extensionName: TrimmedNonEmptyString,
+  command: TrimmedNonEmptyString,
+});
+export type ProviderRuntimePolicy = typeof ProviderRuntimePolicy.Type;
+
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
 

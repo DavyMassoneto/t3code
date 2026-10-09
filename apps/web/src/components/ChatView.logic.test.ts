@@ -1464,10 +1464,10 @@ describe("resolveComposerProviderSelection", () => {
   });
 
   it("uses the custom instance's capability instead of the default instance", () => {
-    const defaultEntry = entry("antigravity", "antigravity", {
+    const defaultEntry = entry("pi", "pi", {
       showInteractionModeToggle: true,
     });
-    const customEntry = entry("antigravity", "google_work", {
+    const customEntry = entry("pi", "pi_work", {
       showInteractionModeToggle: false,
     });
     const selection = resolveComposerProviderSelection({
@@ -1488,11 +1488,11 @@ describe("resolveComposerProviderSelection", () => {
   });
 
   it("uses the fallback provider's plan capability after the draft's instance is disabled", () => {
-    const disabledEntry = entry("antigravity", "antigravity", {
+    const disabledEntry = entry("pi", "pi", {
       enabled: false,
       showInteractionModeToggle: false,
     });
-    const fallbackEntry = entry("codex");
+    const fallbackEntry = entry("pi");
     const selection = resolveComposerProviderSelection({
       entries: [disabledEntry, fallbackEntry],
       candidateInstanceIds: [disabledEntry.instanceId],
@@ -1519,7 +1519,7 @@ describe("resolveComposerProviderSelection", () => {
     const selection = resolveComposerProviderSelection({
       entries: [entry("codex"), signedOutEntry],
       candidateInstanceIds: [signedOutEntry.instanceId],
-      lockedProvider: null,
+      lockedProvider: ProviderDriverKind.make("antigravity"),
       lockedInstanceId: null,
     });
 

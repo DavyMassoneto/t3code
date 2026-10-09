@@ -39,6 +39,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { UsageLimitsPooled } from "./UsageLimitsPooled";
 import { PROVIDER_PRESENTATION } from "./usageProviders";
+import { PiProviderLimits } from "./PiProviderLimits";
 
 const PACE: Record<LimitPace, { readonly label: string; readonly icon: typeof GaugeIcon }> = {
   ahead: { label: "Ahead of pace: spending faster than the window elapses", icon: TrendingUpIcon },
@@ -343,11 +344,13 @@ export function UsageLimitsSection({
   hiddenProviders,
   now,
   cursorPrompt,
+  refreshToken = 0,
 }: {
   readonly selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null;
   readonly hiddenProviders: ReadonlySet<UsageProviderKind>;
   readonly now: number;
   readonly cursorPrompt?: ReactNode;
+  readonly refreshToken?: number;
 }) {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
   const hiddenDrivers = new Set<ServerProvider["driver"]>(
@@ -382,5 +385,30 @@ export function UsageLimitsSection({
       ];
     }),
   );
-  return <UsageLimitsPooled presentations={selected} now={now} cursorPrompt={cursorPrompt} />;
+  const nativeProviders = [...selected].flatMap(([environmentId, presentation]) =>
+    presentation.connection.phase === "connected"
+      ? (presentation.serverConfig?.providers ?? [])
+          .filter((provider) => provider.driver === "pi" && provider.enabled)
+          .map((provider) => ({ environmentId, presentation, provider }))
+      : [],
+  );
+  return (
+    <>
+      <UsageLimitsPooled
+        presentations={selected}
+        now={now}
+        cursorPrompt={cursorPrompt}
+        suppressEmptyState={nativeProviders.length > 0}
+      />
+      {nativeProviders.map(({ environmentId, presentation, provider }) => (
+        <PiProviderLimits
+          key={`${environmentId}:${provider.instanceId}`}
+          environmentId={environmentId}
+          instanceId={provider.instanceId}
+          contextLabel={`${presentation.entry.target.label} · ${provider.displayName ?? "Pi"}`}
+          refreshToken={refreshToken}
+        />
+      ))}
+    </>
+  );
 }

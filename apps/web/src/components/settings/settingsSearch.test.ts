@@ -10,6 +10,7 @@ import {
   searchableSetting,
   searchSettings,
   SETTINGS_SEARCH_ITEMS,
+  SETTINGS_SECTION_LABELS,
   type SettingsSearchItem,
 } from "./settingsSearch";
 
@@ -45,6 +46,46 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it("registers Plugins as a peer of Providers with discoverable package search terms", () => {
+    expect(SETTINGS_SECTION_LABELS["/settings/plugins"]).toBe("Plugins");
+    const paths = Object.keys(SETTINGS_SECTION_LABELS);
+    expect(paths.indexOf("/settings/plugins")).toBe(paths.indexOf("/settings/providers") + 1);
+    for (const query of [
+      "plugins",
+      "Pi packages",
+      "extensions",
+      "installed",
+      "discover",
+      "gallery",
+    ]) {
+      expect(
+        searchSettings(query).some(
+          (item) => item.id === "plugins" && item.to === "/settings/plugins",
+        ),
+      ).toBe(true);
+    }
+    expect(getSettingsSearchTargetScope("plugins")?.scope).toBeNull();
+  });
+  it("gates plugin search by connected provider environment, not local-management permissions", () => {
+    const availability = {
+      hasCloudPublicConfig: false,
+      hasEnvironment: true,
+      hasProviderSettingsEnvironment: true,
+      hasMacProviderSettingsEnvironment: false,
+      canManageLocalBackend: false,
+      isWslSettingsRowVisible: false,
+      hasThreadAutoSettlement: false,
+    };
+    expect(
+      filterAvailableSettingsSearchItems(availability).some((item) => item.id === "plugins"),
+    ).toBe(true);
+    expect(
+      filterAvailableSettingsSearchItems({
+        ...availability,
+        hasProviderSettingsEnvironment: false,
+      }).some((item) => item.id === "plugins"),
+    ).toBe(false);
+  });
   it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
   });

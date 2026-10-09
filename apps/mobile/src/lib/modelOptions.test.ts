@@ -13,13 +13,68 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("uses Pi for new tasks even when stored defaults reference another harness", () => {
+    const providers = ["codex", "pi_work", "pi_personal"].map((instanceId) => ({
+      instanceId,
+      driver: instanceId === "codex" ? "codex" : "pi",
+      enabled: true,
+      installed: true,
+      auth: { status: "authenticated" },
+      models: [{ slug: "current", name: "Current", isDefault: true, capabilities: null }],
+    }));
+    const config = { providers } as unknown as ServerConfig;
+    const legacy = { instanceId: ProviderInstanceId.make("codex"), model: "current" };
+    const options = buildModelOptions(config, legacy);
+    expect(groupByProvider(options).map((group) => group.providerKey)).toEqual([
+      "pi_work",
+      "pi_personal",
+    ]);
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: legacy,
+        projectDefaultSelection: legacy,
+        stickySelection: legacy,
+        modelOptions: options,
+      }),
+    ).toEqual({ instanceId: "pi_work", model: "current" });
+    expect(resolveDefaultableModelSelection(config, legacy)).toBeNull();
+    expect(legacy).toEqual({ instanceId: "codex", model: "current" });
+  });
+
+  it("does not invent a Pi model missing from its authoritative catalog", () => {
+    const selection = { instanceId: ProviderInstanceId.make("pi_work"), model: "removed" };
+    const config = {
+      providers: [
+        {
+          instanceId: selection.instanceId,
+          driver: "pi",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [],
+        },
+      ],
+    } as unknown as ServerConfig;
+    const options = buildModelOptions(config, selection);
+    expect(options[0]?.isUnavailable).toBe(true);
+    expect(resolveDefaultableModelSelection(config, selection)).toBeNull();
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: selection,
+        projectDefaultSelection: selection,
+        stickySelection: selection,
+        modelOptions: options,
+      }),
+    ).toBeNull();
+  });
+
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [
         {
-          instanceId: "codex",
-          driver: "codex",
-          displayName: "Codex",
+          instanceId: "pi",
+          driver: "pi",
+          displayName: "Pi",
           enabled: true,
           installed: true,
           auth: { status: "authenticated" },
@@ -44,17 +99,17 @@ describe("mobile model options", () => {
 
     expect(groupByProvider(buildModelOptions(config, null))).toMatchObject([
       {
-        providerKey: "codex",
-        providerLabel: "Codex",
+        providerKey: "pi",
+        providerLabel: "Pi",
         models: [
-          { key: "codex:gpt-5.6-sol", label: "GPT-5.6 Sol", subtitle: "", isLegacy: false },
-          { key: "codex:gpt-5.4", label: "GPT-5.4", isLegacy: true },
+          { key: "pi:gpt-5.6-sol", label: "GPT-5.6 Sol", subtitle: "", isLegacy: false },
+          { key: "pi:gpt-5.4", label: "GPT-5.4", isLegacy: true },
         ],
       },
     ]);
   });
 
-  it("carries configured ACP identity into model and provider catalogs", () => {
+  it("excludes configured ACP harnesses from the picker", () => {
     const iconUrl = "https://cdn.agentclientprotocol.com/registry/v1/latest/antigravity-acp.svg";
     const config = {
       providers: [
@@ -78,32 +133,21 @@ describe("mobile model options", () => {
       ],
     } as unknown as ServerConfig;
 
-    const [group] = groupByProvider(buildModelOptions(config, null));
-
-    expect(group).toMatchObject({
-      providerKey: "acpRegistry_antigravity",
-      providerLabel: "Antigravity",
-      models: [
-        {
-          providerDriver: "acpRegistry",
-          providerIconUrl: iconUrl,
-        },
-      ],
-    });
+    expect(buildModelOptions(config, null)).toEqual([]);
   });
 
-  it("distinguishes same-name OpenCode models without changing their routing", () => {
+  it("distinguishes same-name Pi models without changing their routing", () => {
     const sources = [
       { id: "anthropic", label: "Anthropic" },
       { id: "github-copilot", label: "GitHub Copilot" },
-      { id: "opencode", label: "OpenCode Zen" },
+      { id: "pi", label: "OpenCode Zen" },
     ];
     const config = {
       providers: [
         {
-          instanceId: "opencode_work",
-          driver: "opencode",
-          displayName: "OpenCode Work",
+          instanceId: "pi_work",
+          driver: "pi",
+          displayName: "Pi Work",
           enabled: true,
           installed: true,
           auth: { status: "authenticated" },
@@ -118,7 +162,7 @@ describe("mobile model options", () => {
       ],
     } as unknown as ServerConfig;
     const selection = {
-      instanceId: ProviderInstanceId.make("opencode_work"),
+      instanceId: ProviderInstanceId.make("pi_work"),
       model: "github-copilot/claude-fable-5",
     };
 
@@ -126,18 +170,18 @@ describe("mobile model options", () => {
 
     expect(options).toMatchObject(
       sources.map((source) => ({
-        key: `opencode_work:${source.id}/claude-fable-5`,
+        key: `pi_work:${source.id}/claude-fable-5`,
         label: "Claude Fable 5",
         subtitle: source.label,
-        providerLabel: "OpenCode Work",
+        providerLabel: "Pi Work",
         selection: {
-          instanceId: "opencode_work",
+          instanceId: "pi_work",
           model: `${source.id}/claude-fable-5`,
         },
       })),
     );
     expect(groupByProvider(options)).toEqual([
-      { providerKey: "opencode_work", providerLabel: "OpenCode Work", models: options },
+      { providerKey: "pi_work", providerLabel: "Pi Work", models: options },
     ]);
   });
 
@@ -145,9 +189,9 @@ describe("mobile model options", () => {
     const config = {
       providers: [
         {
-          instanceId: "codex",
-          driver: "codex",
-          displayName: "Codex",
+          instanceId: "pi",
+          driver: "pi",
+          displayName: "Pi",
           enabled: true,
           installed: true,
           auth: { status: "authenticated" },
@@ -177,7 +221,7 @@ describe("mobile model options", () => {
     } as unknown as ServerConfig;
 
     const [option] = buildModelOptions(config, {
-      instanceId: ProviderInstanceId.make("codex"),
+      instanceId: ProviderInstanceId.make("pi"),
       model: "gpt-test",
     });
 
@@ -185,38 +229,38 @@ describe("mobile model options", () => {
     expect(option?.selection.options).toBeUndefined();
 
     const [emptyOption] = buildModelOptions(config, {
-      instanceId: ProviderInstanceId.make("codex"),
+      instanceId: ProviderInstanceId.make("pi"),
       model: "gpt-test",
       options: [],
     });
     expect(emptyOption?.selection).toEqual(option?.selection);
 
     const [explicitOption] = buildModelOptions(config, {
-      instanceId: ProviderInstanceId.make("codex"),
+      instanceId: ProviderInstanceId.make("pi"),
       model: "gpt-test",
       options: [{ id: "serviceTier", value: "priority" }],
     });
     expect(explicitOption?.selection.options).toEqual([{ id: "serviceTier", value: "priority" }]);
   });
 
-  it("limits existing threads to their provider while new tasks keep every provider", () => {
-    const providers = ["codex", "claudeAgent"].map((instanceId) => ({
+  it("limits existing threads to their provider while new tasks keep every Pi instance", () => {
+    const providers = ["pi", "pi_work"].map((instanceId) => ({
       instanceId,
-      driver: instanceId,
+      driver: "pi",
       enabled: true,
       installed: true,
       auth: { status: "authenticated" },
       models: [{ slug: "test", name: instanceId, capabilities: null }],
     }));
     const config = { providers } as unknown as ServerConfig;
-    const selection = { instanceId: ProviderInstanceId.make("codex"), model: "test" };
+    const selection = { instanceId: ProviderInstanceId.make("pi"), model: "test" };
 
     expect(buildModelOptions(config, selection).map((option) => option.providerKey)).toEqual([
-      "codex",
-      "claudeAgent",
+      "pi",
+      "pi_work",
     ]);
     expect(buildModelOptions(config, selection, selection.instanceId)).toEqual(
-      buildModelOptions(config, selection).filter((option) => option.providerKey === "codex"),
+      buildModelOptions(config, selection).filter((option) => option.providerKey === "pi"),
     );
   });
 
@@ -253,8 +297,8 @@ describe("mobile model options", () => {
     const config = {
       providers: [
         {
-          instanceId: "codex",
-          driver: "codex",
+          instanceId: "pi",
+          driver: "pi",
           enabled: true,
           installed: true,
           auth: { status: "authenticated" },
@@ -272,7 +316,7 @@ describe("mobile model options", () => {
     } as unknown as ServerConfig;
 
     const usable = {
-      instanceId: ProviderInstanceId.make("codex"),
+      instanceId: ProviderInstanceId.make("pi"),
       model: "gpt-5.6-sol",
     };
     const disabled = {
@@ -343,7 +387,7 @@ describe("mobile model options", () => {
       };
 
       expect(resolveSelectableModelSelection(unavailableConfig, selection)).toBe(selection);
-      expect(resolveDefaultableModelSelection(unavailableConfig, selection)).toBe(selection);
+      expect(resolveDefaultableModelSelection(unavailableConfig, selection)).toBeNull();
       expect(isModelSelectionUnavailable(unavailableConfig, selection)).toBe(true);
       expect(buildModelOptions(unavailableConfig, null)).toEqual([]);
       const [option] = buildModelOptions(unavailableConfig, selection);
@@ -371,7 +415,7 @@ describe("mobile model options", () => {
         })),
       };
 
-      expect(resolveDefaultableModelSelection(changedConfig, selection)).toBe(selection);
+      expect(resolveDefaultableModelSelection(changedConfig, selection)).toBeNull();
       expect(isModelSelectionUnavailable(changedConfig, selection)).toBe(true);
       const options = buildModelOptions(changedConfig, selection);
       const missing = options.find((option) => option.selection.model === selection.model);
@@ -390,13 +434,13 @@ describe("mobile model options", () => {
           stickySelection: null,
           modelOptions: options,
         }),
-      ).toBe(selection);
+      ).toBeNull();
 
       const [restored] = buildModelOptions(config, selection);
       expect(isModelSelectionUnavailable(config, selection)).toBe(false);
       expect(restored?.isUnavailable).not.toBe(true);
       expect(restored?.selection).toBe(selection);
-      expect(resolveDefaultableModelSelection(config, selection)).toBe(selection);
+      expect(resolveDefaultableModelSelection(config, selection)).toBeNull();
       expect(buildModelOptions(config, null)[0]?.selection.options).toBeUndefined();
     });
 
@@ -410,7 +454,7 @@ describe("mobile model options", () => {
         },
       } as unknown as ServerConfig;
 
-      expect(resolveDefaultableModelSelection(missingStatusConfig, selection)).toBe(selection);
+      expect(resolveDefaultableModelSelection(missingStatusConfig, selection)).toBeNull();
       expect(isModelSelectionUnavailable(missingStatusConfig, selection)).toBe(true);
       expect(buildModelOptions(missingStatusConfig, selection)).toMatchObject([
         {
@@ -438,9 +482,9 @@ describe("mobile model options", () => {
     const config = {
       providers: [
         {
-          instanceId: "codex",
-          driver: "codex",
-          displayName: "Codex",
+          instanceId: "pi",
+          driver: "pi",
+          displayName: "Pi",
           enabled: true,
           installed: true,
           auth: { status: "authenticated" },
@@ -458,8 +502,8 @@ describe("mobile model options", () => {
       ],
     } as unknown as ServerConfig;
 
-    const current = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" };
-    const legacy = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    const current = { instanceId: ProviderInstanceId.make("pi"), model: "gpt-5.6-sol" };
+    const legacy = { instanceId: ProviderInstanceId.make("pi"), model: "gpt-5.4" };
 
     expect(resolveDefaultableModelSelection(config, current)).toBe(current);
     // A legacy last-used selection falls through to the provider default.
@@ -469,12 +513,13 @@ describe("mobile model options", () => {
   });
 
   it("resolves new tasks from draft, project, sticky, then provider defaults", () => {
-    const draft = { instanceId: ProviderInstanceId.make("codex"), model: "draft" };
-    const project = { instanceId: ProviderInstanceId.make("codex"), model: "project" };
-    const sticky = { instanceId: ProviderInstanceId.make("codex"), model: "sticky" };
+    const draft = { instanceId: ProviderInstanceId.make("pi"), model: "draft" };
+    const project = { instanceId: ProviderInstanceId.make("pi"), model: "project" };
+    const sticky = { instanceId: ProviderInstanceId.make("pi"), model: "sticky" };
     const providerDefault = {
-      selection: { instanceId: ProviderInstanceId.make("codex"), model: "default" },
+      selection: { instanceId: ProviderInstanceId.make("pi"), model: "default" },
       isDefault: true,
+      providerDriver: "pi",
     } as ModelOption;
     const resolve = (
       draftSelection: ModelSelection | null,
@@ -485,7 +530,14 @@ describe("mobile model options", () => {
         draftSelection,
         projectDefaultSelection,
         stickySelection,
-        modelOptions: [providerDefault],
+        modelOptions: [
+          providerDefault,
+          ...[draft, project, sticky].map((selection) => ({
+            ...providerDefault,
+            selection,
+            isDefault: false,
+          })),
+        ],
       });
 
     expect(resolve(draft, project, sticky)).toBe(draft);

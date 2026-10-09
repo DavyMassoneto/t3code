@@ -21,6 +21,13 @@ Use `vp run dev` for server and web, or `vp run dev:desktop` for the Electron cl
 `dev:server` and `dev:web` start those processes separately.
 See the [mobile README](../../apps/mobile/README.md) for native builds and Metro.
 
+For an isolated built desktop, set `T3CODE_HOME` to a workspace-local directory and,
+on Windows, `APPDATA` to a separate directory for the Electron profile. Set
+`T3CODE_DESKTOP_SUPPRESS_PROTOCOL_REGISTRATION=true` to avoid changing OS URL handlers.
+This preserves the internal renderer scheme and profile-scoped single-instance lock,
+but external OAuth deep links will still go to the installed handler, not the isolated app.
+The flag defaults to false. Do not set `VITE_DEV_SERVER_URL` for a built desktop launch.
+
 Flags go directly after the task name, for example `vp run dev --home-dir /tmp/t3code-dev`.
 Add `--browser` to open a browser automatically.
 

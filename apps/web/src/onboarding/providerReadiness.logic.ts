@@ -1,6 +1,7 @@
 import {
   ClaudeSettings,
   CodexSettings,
+  PiSettings,
   type ExecutionEnvironmentPlatformOs,
   type ServerProvider,
   type ServerSettings,
@@ -10,6 +11,7 @@ import * as Schema from "effect/Schema";
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+const decodePiSettings = Schema.decodeUnknownOption(PiSettings);
 const SAFE_SHELL_BINARY_PATTERN = /^[A-Za-z0-9_./:\\-]+$/;
 
 function quoteProviderBinary(
@@ -79,6 +81,10 @@ export function selectOnboardingProvidersByDriver(
  * one-click updater in Settings keeps working after install.
  */
 const NATIVE_INSTALL_COMMANDS = {
+  pi: {
+    windows: "npm install -g @earendil-works/pi-coding-agent",
+    posix: "npm install -g @earendil-works/pi-coding-agent",
+  },
   claudeAgent: {
     windows: "irm https://claude.ai/install.ps1 | iex",
     posix: "curl -fsSL https://claude.ai/install.sh | bash",
@@ -110,6 +116,12 @@ export function resolveOnboardingProviderLoginCommand(
   platform: ExecutionEnvironmentPlatformOs,
 ): string {
   const instance = settings.providerInstances[provider.instanceId];
+
+  if (provider.driver === "pi") {
+    const config = decodePiSettings(instance ? (instance.config ?? {}) : settings.providers.pi);
+    const binaryPath = Option.isSome(config) ? config.value.binaryPath : "pi";
+    return quoteProviderBinary(binaryPath, "pi", platform);
+  }
 
   if (provider.driver === "claudeAgent") {
     const config = decodeClaudeSettings(

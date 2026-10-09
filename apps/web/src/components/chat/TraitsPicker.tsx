@@ -1,4 +1,5 @@
 import {
+  PI_RUNTIME_POLICY_OPTION_ID,
   type ModelSelection,
   type ProviderDriverKind,
   type ProviderInstanceId,
@@ -336,7 +337,9 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     planModeEnabled,
   });
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
-    updateModelOptions(buildProviderOptionSelectionsFromDescriptors(nextDescriptors));
+    const nextOptions = buildProviderOptionSelectionsFromDescriptors(nextDescriptors) ?? [];
+    const runtimePolicy = modelOptions?.find((option) => option.id === PI_RUNTIME_POLICY_OPTION_ID);
+    updateModelOptions(runtimePolicy ? [...nextOptions, runtimePolicy] : nextOptions);
   };
 
   const handleSelectChange = (

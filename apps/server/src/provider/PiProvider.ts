@@ -55,6 +55,7 @@ import {
 } from "./piThinkingCapabilities.ts";
 import {
   parsePiDiscoveredCommands,
+  parsePiRuntimePolicies,
   withPiBuiltinSlashCommands,
   type PiDiscoveredCommands,
 } from "./PiCommands.ts";
@@ -78,15 +79,8 @@ const PI_RPC_DISCOVERY_TIMEOUT_MS = 15_000;
  */
 export const MINIMUM_PI_VERSION = "0.80.5";
 
-/** Deferring to the user's own settings.json default model. */
-const PI_DEFAULT_MODEL: ServerProviderModel = {
-  slug: "default",
-  name: "Pi default",
-  isCustom: false,
-  capabilities: EMPTY_PI_MODEL_CAPABILITIES,
-};
-
 interface PiDiscovery extends PiDiscoveredCommands {
+  readonly runtimePolicies: ReturnType<typeof parsePiRuntimePolicies>;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly authenticated: boolean;
 }
@@ -96,15 +90,18 @@ function piModelsFromSettings(
   discovered: ReadonlyArray<ServerProviderModel> = [],
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(
-    [PI_DEFAULT_MODEL, ...discovered],
-    customModels ?? [],
+    discovered,
+    (customModels ?? []).filter(
+      (model) => (typeof model === "string" ? model : model.slug) !== "default",
+    ),
     EMPTY_PI_MODEL_CAPABILITIES,
   );
 }
 
-function parseDiscoveredModels(
+export function parseDiscoveredModels(
   data: unknown,
   defaultThinkingLevel: unknown,
+  selectedModel?: unknown,
 ): ReadonlyArray<ServerProviderModel> {
   const models = recordField(data, "models");
   if (!Array.isArray(models)) return [];
@@ -122,6 +119,9 @@ function parseDiscoveredModels(
       name: recordString(model, "name") ?? slug,
       subProvider: provider,
       isCustom: false,
+      isDefault:
+        provider === recordString(selectedModel, "provider") &&
+        id === recordString(selectedModel, "id"),
       capabilities: thinkingCapabilitiesForPiModel(model, defaultThinkingLevel),
     });
   }
@@ -171,12 +171,14 @@ const discoverPiViaRpc = (
     const discoveredModels = parseDiscoveredModels(
       modelsData,
       recordString(stateData, "thinkingLevel"),
+      recordField(stateData, "model"),
     );
     const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
     return {
       models: discoveredModels,
       slashCommands: withPiBuiltinSlashCommands(slashCommands),
       skills,
+      runtimePolicies: parsePiRuntimePolicies(commandsData),
       authenticated: discoveredModels.length > 0,
     } satisfies PiDiscovery;
   }).pipe(Effect.scoped);
@@ -197,7 +199,11 @@ export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
     // A failed read must not replace a previously usable workspace catalog with an empty one.
     const commandsData = yield* connection.request({ type: "get_commands" });
     const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
-    return { slashCommands: withPiBuiltinSlashCommands(slashCommands), skills };
+    return {
+      slashCommands: withPiBuiltinSlashCommands(slashCommands),
+      skills,
+      runtimePolicies: parsePiRuntimePolicies(commandsData),
+    };
   },
   Effect.scoped,
   Effect.timeoutOrElse({
@@ -437,26 +443,35 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
 
   const discovery = discoveryExit.value.value;
   const models = piModelsFromSettings(piSettings.customModels, discovery.models);
-  return buildServerProvider({
-    presentation: PI_PRESENTATION,
-    enabled: piSettings.enabled,
-    checkedAt,
-    models,
-    slashCommands: discovery.slashCommands,
-    skills: discovery.skills,
-    probe: {
-      installed: true,
-      version,
-      status: discovery.authenticated ? "ready" : "warning",
-      auth: { status: discovery.authenticated ? "authenticated" : "unauthenticated", type: "pi" },
-      ...(discovery.authenticated
-        ? {}
-        : {
-            message:
-              "Pi has no usable models. Run `pi` in a terminal and use /login, or configure an API key in ~/.pi/agent.",
-          }),
-    },
-  });
+  return {
+    ...buildServerProvider({
+      presentation: {
+        ...PI_PRESENTATION,
+        supportedRuntimeModes:
+          discovery.runtimePolicies.length > 0
+            ? [...PI_PRESENTATION.supportedRuntimeModes, "auto"]
+            : PI_PRESENTATION.supportedRuntimeModes,
+      },
+      enabled: piSettings.enabled,
+      checkedAt,
+      models,
+      slashCommands: discovery.slashCommands,
+      skills: discovery.skills,
+      probe: {
+        installed: true,
+        version,
+        status: discovery.authenticated ? "ready" : "warning",
+        auth: { status: discovery.authenticated ? "authenticated" : "unauthenticated", type: "pi" },
+        ...(discovery.authenticated
+          ? {}
+          : {
+              message:
+                "Pi has no usable models. Run `pi` in a terminal and use /login, or configure an API key in ~/.pi/agent.",
+            }),
+      },
+    }),
+    runtimePolicies: discovery.runtimePolicies,
+  };
 });
 
 export const enrichPiSnapshot = (input: {

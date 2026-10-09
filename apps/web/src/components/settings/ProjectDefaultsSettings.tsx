@@ -37,7 +37,6 @@ import {
 import {
   useScopedSettings,
   useScopedSettingsMixed,
-  useScopedSettingSource,
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 
@@ -71,7 +70,12 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     selection?.instanceId,
     selection?.model,
   );
-  const activeEntry = entries.find((entry) => entry.instanceId === selection?.instanceId);
+  const activeEntry = selection
+    ? entries.find((entry) => entry.instanceId === selection.instanceId)
+    : entries.find((entry) => entry.driverKind === "pi" && entry.enabled && entry.isAvailable);
+  const modelDefaultEntry =
+    entries.find((entry) => entry.instanceId === settings.defaultModelSelection?.instanceId) ??
+    activeEntry;
   const mixedModel = useScopedSettingsMixed(["defaultModelSelection"]);
   const mixedPermissions = useScopedSettingsMixed(["defaultRuntimeMode"]);
   const PermissionIcon = runtimeModeConfig[settings.defaultRuntimeMode].icon;
@@ -81,7 +85,6 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedAgentCredits = useScopedSettingsMixed(["removeAgentCreditsOnMerge"]);
   const mixedMergeMethod = useScopedSettingsMixed(["pullRequestMergeMethod"]);
-  const modelSource = useScopedSettingSource(["defaultModelSelection"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
   const unavailable = connectedEnvironments.length === 0;
   // File-backed keys show their effective value; the target already carries
@@ -142,24 +145,19 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
           ? "Model for new threads in this project."
           : "Default model for new threads. Projects can override it."
       }
-      status={
-        unavailable || mixedModel || modelSource === "project"
-          ? undefined
-          : settings.defaultModelSelection === null
-            ? "Automatic"
-            : undefined
-      }
       resetAction={
+        !isProjectScope &&
+        modelDefaultEntry?.driverKind !== "pi" &&
         settings.defaultModelSelection !== null ? (
           <SettingResetButton label="default model" onClick={() => setModel(null)} />
         ) : null
       }
       control={
-        selection && activeEntry ? (
+        activeEntry ? (
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
             <ProviderModelPicker
-              activeInstanceId={selection.instanceId}
-              model={selection.model}
+              activeInstanceId={activeEntry.instanceId}
+              model={selection?.model ?? ""}
               lockedProvider={null}
               instanceEntries={entries}
               modelOptionsByInstance={modelOptions}
@@ -177,7 +175,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                 setModel(createModelSelection(instanceId, model))
               }
             />
-            {!mixedModel ? (
+            {!mixedModel && selection ? (
               <TraitsPicker
                 provider={activeEntry.driverKind}
                 models={activeEntry.models}

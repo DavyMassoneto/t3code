@@ -1,0 +1,155 @@
+name: Pi Desktop Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag on main (for example v0.0.1)"
+        required: true
+        default: v0.0.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-desktop-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.repository == 'DavyMassoneto/t3code'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref_name }}
+      - id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          git rev-parse --verify "refs/tags/$RELEASE_TAG"
+          git merge-base --is-ancestor HEAD origin/main
+          version="${RELEASE_TAG#v}"
+          test "$(node -p 'require("./apps/desktop/package.json").version')" = "$version"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: win
+            arch: x64
+            target: nsis
+            rust-target: x86_64-pc-windows-msvc
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+            target: dmg
+            rust-target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            platform: mac
+            arch: x64
+            target: dmg
+            rust-target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            target: AppImage
+            rust-target: x86_64-unknown-linux-gnu
+    env:
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: DavyMassoneto/t3code
+      T3CODE_DESKTOP_SIGNED: "false"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install build dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust-target }}
+      - name: Install Linux native prerequisites
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsecret-1-dev pkg-config imagemagick libwayland-dev
+      - name: Install Windows Spectre libraries
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe -WindowStyle Hidden -Wait -PassThru -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart"
+          if ($null -eq $proc -or $proc.ExitCode -notin @(0, 3010)) { throw "Visual Studio Installer failed" }
+      - name: Build native desktop artifact and bundled server
+        run: node scripts/build-desktop-artifact.ts --platform ${{ matrix.platform }} --target ${{ matrix.target }} --arch ${{ matrix.arch }} --build-version ${{ needs.preflight.outputs.version }} --output-dir release --verbose
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            release/Pi-Desktop-*
+            release/latest*.yml
+          if-no-files-found: error
+
+  release:
+    needs: [preflight, build]
+    if: github.repository == 'DavyMassoneto/t3code'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pi-desktop-*
+          path: artifacts
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - run: vp install --frozen-lockfile --filter=@t3tools/scripts...
+      - name: Merge macOS update feeds and collect assets
+        shell: bash
+        run: |
+          mkdir release
+          node scripts/merge-update-manifests.ts --platform mac artifacts/pi-desktop-mac-arm64/latest-mac.yml artifacts/pi-desktop-mac-x64/latest-mac.yml release/latest-mac.yml
+          find artifacts -type f ! -name latest-mac.yml -exec cp {} release/ \;
+          (cd release && sha256sum * > SHA256SUMS)
+      - name: Publish only to the Pi Desktop fork
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo DavyMassoneto/t3code --json isDraft > release-state.json; then
+            test "$(node -p 'JSON.parse(require("fs").readFileSync("release-state.json", "utf8")).isDraft')" = true || { echo "Refusing to overwrite a published release"; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --repo DavyMassoneto/t3code --verify-tag --draft --title "Pi Desktop ${RELEASE_TAG#v}" --notes-file docs/operations/pi-desktop-release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" release/* --repo DavyMassoneto/t3code --clobber
+          gh release edit "$RELEASE_TAG" --repo DavyMassoneto/t3code --draft=false --latest

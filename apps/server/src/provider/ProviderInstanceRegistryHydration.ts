@@ -56,14 +56,11 @@ import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "./builtInDrivers.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import * as ProviderOrchestrationAdapterInfrastructure from "./ProviderOrchestrationAdapterInfrastructure.ts";
-import * as AcpRegistrySupport from "./acp/AcpRegistrySupport.ts";
-import * as AcpRegistryCatalog from "./AcpRegistryCatalog.ts";
 
 type ProviderInstanceRegistryHydrationEnv =
   | Exclude<
       BuiltInDriversEnv,
-      | ProviderOrchestrationAdapterInfrastructure.ProviderOrchestrationAdapterInfrastructure
-      | AcpRegistrySupport.AcpRegistryCatalog
+      ProviderOrchestrationAdapterInfrastructure.ProviderOrchestrationAdapterInfrastructure
     >
   | Settings.ServerSettingsService;
 
@@ -178,10 +175,7 @@ export const layer: Layer.Layer<
     const layerMutable = ProviderInstanceRegistry.layer({
       drivers: BUILT_IN_DRIVERS,
       configMap: initialConfigMap,
-    }).pipe(
-      Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
-      Layer.provide(AcpRegistryCatalog.layer),
-    );
+    }).pipe(Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer));
 
     return layerSettingsWatcher.pipe(Layer.provideMerge(layerMutable));
   }),

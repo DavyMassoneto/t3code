@@ -25,6 +25,7 @@ import {
   resolveProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+import { readCustomModelEntries, toCustomModelSetting } from "@t3tools/shared/model";
 import {
   getBackgroundActivityPresetSettings,
   resolveServerBackgroundActivitySettings,
@@ -33,8 +34,11 @@ import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
+import * as Redacted from "effect/Redacted";
 import { PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { PiOpenaiUsageAuth } from "./PiOpenaiUsageAuth";
+import { PiProviderLimits } from "../usage/PiProviderLimits";
 
 import { isDesktopLocalConnectionTarget } from "../../connection/desktopLocal";
 import {
@@ -55,6 +59,7 @@ import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useEnvironmentSessionState } from "../../state/session";
 import { useProjects } from "../../state/entities";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { setPiConnectionApiKey } from "../../state/piConnectionCredentials";
 import { getRelativeTimeState } from "../../timestampFormat";
 import {
   ConnectionStatusDot,
@@ -87,10 +92,32 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ExpandableText } from "./ExpandableText";
-import { ProviderInstanceCard } from "./ProviderInstanceCard";
-import { UsageProviderSettings } from "./UsageProviderSettings";
+import { ProviderInstanceCard, deriveProviderModelsForDisplay } from "./ProviderInstanceCard";
+import { ProviderModelsSection } from "./ProviderModelsSection";
+import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
+import {
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogPopup,
+  DialogPanel,
+  DialogFooter,
+} from "../ui/dialog";
+import {
+  PiConnectionDetails,
+  PiConnectionCredentialsForm,
+  usePiConnections,
+} from "./PiConnectionsPanel";
+import {
+  buildNativeProviderRail,
+  resolveNativeProviderSelection,
+  filterNativeProviderCatalog,
+  nativeServiceOwnsModel,
+  mergeNativeServiceValues,
+} from "./providerRail";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
 import { CodexSetupSection, CodexManagedRuntimeFields } from "./CodexSetupSection";
@@ -563,6 +590,8 @@ export function EnvironmentProviderSettings({
   const settings = useEnvironmentSettings(environmentId);
   const canWriteSettings = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const canRefreshProviders = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
+  const canSavePiCredentials = useAtomValue(setPiConnectionApiKey.permissionAtom(environmentId));
+  const savePiCredentials = useAtomCommand(setPiConnectionApiKey, { reportFailure: false });
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
   const persistProviderInstance = usePersistEnvironmentProviderInstanceMutation(environmentId);
   const updateClientSettings = useUpdateClientSettings();
@@ -583,7 +612,18 @@ export function EnvironmentProviderSettings({
     reportFailure: false,
   });
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
-  const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
+  const [isAddProviderOpen, setIsAddProviderOpen] = useState(false);
+  const [providerQuery, setProviderQuery] = useState("");
+  const [configuringProvider, setConfiguringProvider] = useState<{
+    environmentId: EnvironmentId;
+    instanceId: ProviderInstanceId;
+    service: string;
+  } | null>(null);
+  const [selectedService, setSelectedService] = useState<string | null>(null);
+  const [usageAuthorization, setUsageAuthorization] = useState<{
+    target: string;
+    revision: number;
+  } | null>(null);
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | null>(
     targetInstanceId ?? null,
   );
@@ -794,8 +834,7 @@ export function EnvironmentProviderSettings({
       const isDirty =
         explicitInstance !== undefined || !Equal.equals(legacyConfig, defaultLegacyConfig);
       if (
-        driver === "codex" ||
-        driver === "claudeAgent" ||
+        driver === "pi" ||
         isDirty ||
         resolveProviderInstanceEnabled(effectiveInstance) ||
         defaultInstanceId === targetInstanceId
@@ -815,6 +854,7 @@ export function EnvironmentProviderSettings({
     }
   }
   for (const [driver, list] of instancesByDriver) {
+    if (driver !== "pi") continue;
     if (visibleDriverKinds.has(driver)) continue;
     for (const [id, instance] of list) {
       rows.push({
@@ -833,6 +873,23 @@ export function EnvironmentProviderSettings({
   const selectedRow =
     rows.find((row) => row.instanceId === selectedInstanceId) ??
     (targetInstanceMissing ? null : (rows[0] ?? null));
+  const nativeConnections = usePiConnections(environmentId, selectedRow?.instanceId ?? null);
+  const providerRail = selectedRow
+    ? buildNativeProviderRail(
+        environmentId,
+        selectedRow.instanceId,
+        nativeConnections.result?.connections ?? [],
+        configuringProvider?.environmentId === environmentId &&
+          configuringProvider.instanceId === selectedRow.instanceId
+          ? configuringProvider.service
+          : null,
+      )
+    : [];
+  const selectedProvider = resolveNativeProviderSelection(providerRail, selectedService);
+  const providerCatalog = filterNativeProviderCatalog(
+    nativeConnections.result?.connections ?? [],
+    providerQuery,
+  );
 
   const updateProviderInstance = async (
     row: InstanceRow,
@@ -909,6 +966,7 @@ export function EnvironmentProviderSettings({
       readonly modelOrder: ReadonlyArray<string>;
     },
   ) => {
+    if (readOnly || !readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return;
     const hiddenModels = [...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0))];
     const modelOrder = [...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0))];
     const rest = withoutProviderInstanceKey(settings.providerModelPreferences, instanceId);
@@ -930,6 +988,7 @@ export function EnvironmentProviderSettings({
     instanceId: ProviderInstanceId,
     nextFavoriteModels: ReadonlyArray<string>,
   ) => {
+    if (readOnly || !readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return;
     const favoriteModels = [
       ...new Set(
         Arr.filterMap(nextFavoriteModels, (slug) => {
@@ -1152,6 +1211,145 @@ export function EnvironmentProviderSettings({
     );
   };
 
+  const renderProviderModelRow = (
+    row: InstanceRow,
+    connection: NonNullable<typeof selectedProvider>["connection"],
+  ) => {
+    const service = connection.service;
+    const preferences = settings.providerModelPreferences?.[row.instanceId] ?? {
+      hiddenModels: [],
+      modelOrder: [],
+    };
+    const config =
+      row.instance.config !== null && typeof row.instance.config === "object"
+        ? (row.instance.config as Record<string, unknown>)
+        : {};
+    const allCustomModels = readCustomModelEntries(config.customModels);
+    const customModels = allCustomModels.filter((model) =>
+      nativeServiceOwnsModel(service, model.slug),
+    );
+    const liveModels =
+      serverProviders.find((provider) => provider.instanceId === row.instanceId)?.models ?? [];
+    const discoveredSlugs = connection.models.map((model) => model.slug);
+    const serviceLiveModels = liveModels.filter(
+      (model) =>
+        model.subProvider === service ||
+        nativeServiceOwnsModel(service, model.slug) ||
+        discoveredSlugs.includes(model.slug),
+    );
+    const catalogModels = connection.models
+      .filter((model) => !serviceLiveModels.some((live) => live.slug === model.slug))
+      .map((model) => ({
+        slug: model.slug,
+        name: model.name,
+        isCustom: false,
+        capabilities: null,
+      }));
+    const models = deriveProviderModelsForDisplay({
+      liveModels: [...serviceLiveModels, ...catalogModels],
+      customModels,
+    });
+    const modelSlugs = models.map((model) => model.slug);
+    const belongs = (slug: string) =>
+      nativeServiceOwnsModel(service, slug) || modelSlugs.includes(slug);
+    const favoriteModels = (settings.favorites ?? [])
+      .filter((favorite) => favorite.provider === row.instanceId)
+      .map((favorite) => favorite.model);
+    const enabled = modelSlugs.some((slug) => !preferences.hiddenModels.includes(slug));
+    const canWritePreferences = canWriteSettings && !readOnly;
+    return (
+      <section className="space-y-4" aria-label={`${connection.name} model configuration`}>
+        <SettingsRow
+          title="Show provider models in picker"
+          description="App-local model visibility only. Disabling does not stop Pi, disconnect this service, delete credentials or affect other providers."
+          control={
+            <Switch
+              aria-label={`Show ${connection.name} models in picker`}
+              checked={enabled}
+              disabled={!canWritePreferences || modelSlugs.length === 0}
+              onCheckedChange={(checked) =>
+                updateProviderModelPreferences(row.instanceId, {
+                  ...preferences,
+                  hiddenModels: mergeNativeServiceValues(
+                    preferences.hiddenModels,
+                    checked ? [] : modelSlugs,
+                    service,
+                    modelSlugs,
+                  ),
+                })
+              }
+            />
+          }
+        />
+        <ProviderModelsSection
+          key={`${row.instanceId}:${service}`}
+          instanceId={row.instanceId}
+          driverKind={row.driver}
+          models={models}
+          customModels={customModels}
+          canManageCustomModels={
+            !readOnly && readEnvironmentScope(environmentId, AuthProvidersManageScope)
+          }
+          canWritePreferences={canWritePreferences}
+          hiddenModels={preferences.hiddenModels.filter(belongs)}
+          favoriteModels={favoriteModels.filter(belongs)}
+          modelOrder={preferences.modelOrder.filter(belongs)}
+          onHiddenModelsChange={(next) =>
+            updateProviderModelPreferences(row.instanceId, {
+              ...preferences,
+              hiddenModels: mergeNativeServiceValues(
+                preferences.hiddenModels,
+                next,
+                service,
+                modelSlugs,
+              ),
+            })
+          }
+          onModelOrderChange={(next) =>
+            updateProviderModelPreferences(row.instanceId, {
+              ...preferences,
+              modelOrder: mergeNativeServiceValues(
+                preferences.modelOrder,
+                next,
+                service,
+                modelSlugs,
+              ),
+            })
+          }
+          onFavoriteModelsChange={(next) =>
+            updateProviderFavoriteModels(
+              row.instanceId,
+              mergeNativeServiceValues(favoriteModels, next, service, modelSlugs),
+            )
+          }
+          onChange={(next) => {
+            if (readOnly || !readEnvironmentScope(environmentId, AuthProvidersManageScope)) return;
+            if (next.some((model) => !nativeServiceOwnsModel(service, model.slug))) {
+              toastManager.add({
+                type: "error",
+                title: "Use this provider's model prefix",
+                description: `Custom model slugs must start with ${service}/.`,
+              });
+              return;
+            }
+            void updateProviderInstance(row, {
+              ...row.instance,
+              config: {
+                ...config,
+                customModels: [
+                  ...allCustomModels.filter(
+                    (model) => !nativeServiceOwnsModel(service, model.slug),
+                  ),
+                  ...next,
+                ].map(toCustomModelSetting),
+              },
+            });
+          }}
+        />
+      </section>
+    );
+  };
+
   return (
     <>
       <SettingsSection
@@ -1159,21 +1357,18 @@ export function EnvironmentProviderSettings({
         variant="plain"
         titleAction={
           !readOnly ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    size="icon-xs"
-                    variant="ghost-muted"
-                    onClick={() => setIsAddInstanceDialogOpen(true)}
-                    aria-label="Add provider"
-                  >
-                    <PlusIcon />
-                  </Button>
-                }
-              />
-              <TooltipPopup side="top">Add provider</TooltipPopup>
-            </Tooltip>
+            <Button
+              size="xs"
+              variant="outline"
+              aria-label="Add provider"
+              disabled={!nativeConnections.canManage || !selectedRow}
+              onClick={() => {
+                setProviderQuery("");
+                setIsAddProviderOpen(true);
+              }}
+            >
+              <PlusIcon /> Add provider
+            </Button>
           ) : null
         }
         headerAction={
@@ -1187,7 +1382,10 @@ export function EnvironmentProviderSettings({
                     variant="ghost-muted"
                     disabled={isRefreshingProviders || !canRefreshProviders}
                     aria-busy={isRefreshingProviders}
-                    onClick={() => void refreshProviders()}
+                    onClick={() => {
+                      refreshProviders();
+                      void nativeConnections.refresh();
+                    }}
                   >
                     <RefreshIcon refreshing={isRefreshingProviders} />
                     <span className="sr-only">Refresh provider status</span>
@@ -1209,6 +1407,56 @@ export function EnvironmentProviderSettings({
         {deviceTabs ? (
           <div className="flex min-h-11 min-w-0 items-center gap-2 px-3 sm:px-4">{deviceTabs}</div>
         ) : null}
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+          {rows.length > 1 || targetInstanceMissing ? (
+            <>
+              <label
+                htmlFor={`provider-runtime-${environmentId}`}
+                className="text-xs text-muted-foreground"
+              >
+                Advanced runtime configuration
+              </label>
+              <select
+                id={`provider-runtime-${environmentId}`}
+                aria-label="Runtime configuration"
+                value={selectedRow?.instanceId ?? ""}
+                onChange={(event) => {
+                  const row = rows.find((candidate) => candidate.instanceId === event.target.value);
+                  if (row) {
+                    setSelectedInstanceId(row.instanceId);
+                    setSelectedService(null);
+                    setConfiguringProvider(null);
+                    setIsAddProviderOpen(false);
+                  }
+                }}
+                className="min-w-0 rounded border border-border bg-background p-2 text-sm"
+              >
+                {targetInstanceMissing ? (
+                  <option value="">Runtime no longer available</option>
+                ) : null}
+                {rows.map((row) => (
+                  <option key={row.instanceId} value={row.instanceId}>
+                    {row.instance.displayName ?? row.instanceId}
+                  </option>
+                ))}
+              </select>
+            </>
+          ) : null}
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={!nativeConnections.canManage || nativeConnections.busy || !selectedRow}
+            onClick={() => void nativeConnections.refresh()}
+          >
+            {nativeConnections.busy ? "Discovering…" : "Refresh connections"}
+          </Button>
+        </div>
+        {nativeConnections.failed ? (
+          <p role="status" className="px-4 pb-3 text-sm text-muted-foreground">
+            Native connections could not be refreshed. Check the selected runtime in Pi and try
+            again.
+          </p>
+        ) : null}
         {readOnly ? (
           <SettingsGroup divided={false} className="overflow-hidden">
             <SettingsRow
@@ -1225,53 +1473,273 @@ export function EnvironmentProviderSettings({
           )}
         >
           <div className="border-b border-border/60 bg-muted/10 @min-[48rem]/providers:flex @min-[48rem]/providers:min-h-0 @min-[48rem]/providers:flex-col @min-[48rem]/providers:border-r @min-[48rem]/providers:border-b-0">
+            {!readOnly ? (
+              <div className="shrink-0 border-b border-border/60 p-3">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label="Add native provider"
+                  disabled={!nativeConnections.canManage || !selectedRow}
+                  onClick={() => {
+                    setProviderQuery("");
+                    setIsAddProviderOpen(true);
+                  }}
+                >
+                  <PlusIcon /> Add provider
+                </Button>
+              </div>
+            ) : null}
             <ScrollArea
               scrollFade
               chainVerticalScroll
               className="@min-[48rem]/providers:min-h-0 @min-[48rem]/providers:flex-1"
             >
               <div className="divide-y divide-border/50">
-                {rows.map((row) => renderProviderInstance(row, "list"))}
-                {!readOnly ? (
-                  <button
-                    type="button"
-                    className="flex w-full cursor-pointer items-center gap-3 px-3 py-3 text-left text-sm text-muted-foreground transition-colors outline-none hover:bg-muted/25 hover:text-foreground focus-visible:bg-muted/25 focus-visible:text-foreground sm:px-4"
-                    onClick={() => setIsAddInstanceDialogOpen(true)}
-                  >
-                    <PlusIcon className="size-4 shrink-0" />
-                    Add provider
-                  </button>
-                ) : null}
+                <nav aria-label="Native providers">
+                  {providerRail.map((entry) => (
+                    <button
+                      key={entry.service}
+                      type="button"
+                      aria-pressed={selectedProvider?.service === entry.service}
+                      className={cn(
+                        "flex w-full flex-col gap-1 px-4 py-3 text-left text-sm hover:bg-muted/25",
+                        selectedProvider?.service === entry.service && "bg-muted/40",
+                      )}
+                      onClick={() => {
+                        setSelectedService(entry.service);
+                        setIsAddProviderOpen(false);
+                      }}
+                    >
+                      <span className="font-medium">{entry.connection.name}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {entry.connection.configured
+                          ? "Configured"
+                          : "Configuring · credentials required"}
+                        {entry.connection.configured &&
+                        entry.connection.models.length > 0 &&
+                        entry.connection.models.every((model) =>
+                          settings.providerModelPreferences?.[
+                            entry.instanceId
+                          ]?.hiddenModels.includes(model.slug),
+                        )
+                          ? " · Hidden from picker"
+                          : ""}
+                      </span>
+                    </button>
+                  ))}
+                </nav>
               </div>
             </ScrollArea>
           </div>
 
           <div className="min-w-0 @min-[48rem]/providers:min-h-0">
-            {selectedRow ? (
+            {selectedProvider ? (
               <ScrollArea scrollFade chainVerticalScroll className="@min-[48rem]/providers:h-full">
-                <div className="space-y-6 p-4">{renderProviderInstance(selectedRow, "editor")}</div>
+                <div className="space-y-6 p-4">
+                  <PiConnectionDetails
+                    connection={selectedProvider.connection}
+                    credentials={
+                      !readOnly && selectedProvider.connection.authMethods.includes("api_key") ? (
+                        <PiConnectionCredentialsForm
+                          key={JSON.stringify([
+                            selectedProvider.environmentId,
+                            selectedProvider.instanceId,
+                            selectedProvider.service,
+                          ])}
+                          environmentId={selectedProvider.environmentId}
+                          instanceId={selectedProvider.instanceId}
+                          service={selectedProvider.service}
+                          canManage={canSavePiCredentials}
+                          onSaveApiKey={async (apiKey) => {
+                            if (
+                              readOnly ||
+                              !readEnvironmentScope(
+                                selectedProvider.environmentId,
+                                AuthProvidersManageScope,
+                              )
+                            )
+                              return false;
+                            const response = await savePiCredentials({
+                              environmentId: selectedProvider.environmentId,
+                              input: {
+                                instanceId: selectedProvider.instanceId,
+                                service: selectedProvider.service,
+                                apiKey: Redacted.make(apiKey),
+                                consent: true,
+                              },
+                            });
+                            return (
+                              response._tag === "Success" &&
+                              response.value.instanceId === selectedProvider.instanceId &&
+                              response.value.service === selectedProvider.service &&
+                              response.value.configured
+                            );
+                          }}
+                          onSaved={() => {
+                            void nativeConnections.refresh();
+                            refreshProviders();
+                          }}
+                        />
+                      ) : undefined
+                    }
+                    models={
+                      selectedRow
+                        ? renderProviderModelRow(selectedRow, selectedProvider.connection)
+                        : undefined
+                    }
+                  />
+                  {selectedProvider.service === "openai" ||
+                  selectedProvider.service === "openai-codex" ? (
+                    <>
+                      <PiOpenaiUsageAuth
+                        key={JSON.stringify([
+                          selectedProvider.environmentId,
+                          selectedProvider.instanceId,
+                          selectedProvider.service,
+                        ])}
+                        environmentId={selectedProvider.environmentId}
+                        instanceId={selectedProvider.instanceId}
+                        service={selectedProvider.service}
+                        readOnly={readOnly}
+                        onAuthenticated={() => {
+                          void nativeConnections.refresh();
+                          const target = JSON.stringify([
+                            selectedProvider.environmentId,
+                            selectedProvider.instanceId,
+                            selectedProvider.service,
+                          ]);
+                          setUsageAuthorization((previous) => ({
+                            target,
+                            revision: (previous?.revision ?? 0) + 1,
+                          }));
+                        }}
+                      />
+                      {usageAuthorization?.target ===
+                      JSON.stringify([
+                        selectedProvider.environmentId,
+                        selectedProvider.instanceId,
+                        selectedProvider.service,
+                      ]) ? (
+                        <PiProviderLimits
+                          key={usageAuthorization.target}
+                          environmentId={selectedProvider.environmentId}
+                          instanceId={selectedProvider.instanceId}
+                          service={selectedProvider.service}
+                          contextLabel={selectedProvider.connection.name}
+                          readOnly={readOnly}
+                          showUsageAuthorization={false}
+                          refreshToken={usageAuthorization.revision}
+                        />
+                      ) : null}
+                    </>
+                  ) : null}
+                  {!selectedProvider.connection.configured ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setConfiguringProvider(null);
+                        setSelectedService(null);
+                      }}
+                    >
+                      Cancel configuration
+                    </Button>
+                  ) : null}
+                </div>
               </ScrollArea>
             ) : (
               <div className="p-6 text-sm text-muted-foreground">
                 {targetInstanceMissing
                   ? "This provider instance is no longer available on this device."
-                  : "No providers configured."}
+                  : !nativeConnections.canManage
+                    ? "Native provider discovery requires providers:manage permission. Runtime settings remain readable below."
+                    : nativeConnections.failed
+                      ? "Connections could not be discovered. Check this runtime in Pi and refresh connections."
+                      : nativeConnections.busy
+                        ? "Discovering native providers…"
+                        : "No configured native providers. Choose Add provider to configure a connection."}
               </div>
             )}
           </div>
         </SettingsGroup>
       </SettingsSection>
 
-      <UsageProviderSettings
-        key={environmentId}
-        environmentId={environmentId}
-        environmentLabel={environmentLabel}
-        sources={settings.usageLimitSources}
-        cursorKeychainUsageEnabled={settings.cursorKeychainUsageEnabled}
-        readOnly={readOnly}
-      />
+      {isAddProviderOpen && !readOnly ? (
+        <Dialog open onOpenChange={setIsAddProviderOpen}>
+          <DialogPopup>
+            <DialogHeader>
+              <DialogTitle>Add provider</DialogTitle>
+              <DialogDescription>
+                Select a native service to configure. Selecting a service does not connect an
+                account or add another runtime.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogPanel>
+              <div className="space-y-3">
+                <Input
+                  aria-label="Search native providers"
+                  placeholder="Search providers"
+                  value={providerQuery}
+                  onChange={(event) => setProviderQuery(event.target.value)}
+                />
+                <ScrollArea className="max-h-80">
+                  <div className="space-y-2" aria-label="Available native providers">
+                    {providerCatalog.map((connection) => (
+                      <Button
+                        key={connection.service}
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          if (!selectedRow || !nativeConnections.canManage) return;
+                          setConfiguringProvider({
+                            environmentId,
+                            instanceId: selectedRow.instanceId,
+                            service: connection.service,
+                          });
+                          setSelectedService(connection.service);
+                          setIsAddProviderOpen(false);
+                        }}
+                      >
+                        {connection.name} · {connection.service}
+                      </Button>
+                    ))}
+                    {providerCatalog.length === 0 ? (
+                      <p role="status" className="text-sm text-muted-foreground">
+                        {nativeConnections.busy
+                          ? "Discovering providers…"
+                          : "No matching disconnected providers. Refresh connections after adding custom services in Pi."}
+                      </p>
+                    ) : null}
+                  </div>
+                </ScrollArea>
+              </div>
+            </DialogPanel>
+            <DialogFooter>
+              <Button size="sm" variant="outline" onClick={() => setIsAddProviderOpen(false)}>
+                Cancel
+              </Button>
+            </DialogFooter>
+          </DialogPopup>
+        </Dialog>
+      ) : null}
 
       <SettingsSection title="Advanced">
+        {selectedRow ? (
+          <>
+            <details>
+              <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+                Runtime settings
+              </summary>
+              <div className="space-y-6 p-4">
+                <p className="text-xs text-muted-foreground">
+                  Runtime binary, flags and permissions are app tools, not model-service providers.
+                  Changes apply to the selected runtime configuration.
+                </p>
+                {renderProviderInstance(selectedRow, "editor")}
+              </div>
+            </details>
+          </>
+        ) : null}
         <SettingsRow
           id={searchableSetting("provider-health-check-interval").id}
           title={
@@ -1346,16 +1814,6 @@ export function EnvironmentProviderSettings({
           }
         />
       </SettingsSection>
-
-      {isAddInstanceDialogOpen && !readOnly ? (
-        <AddProviderInstanceDialog
-          open
-          environmentId={environmentId}
-          environmentLabel={environmentLabel}
-          onOpenChange={setIsAddInstanceDialogOpen}
-          onCreated={setSelectedInstanceId}
-        />
-      ) : null}
     </>
   );
 }

@@ -195,6 +195,9 @@ export function upsertProviderWorkspaceSnapshot(
       : scopedSnapshot.slashCommands,
     ...(scopedSnapshot.slashCommandsPending ? { slashCommandsPending: true } : {}),
     skills: scopedSnapshot.skills,
+    ...(scopedSnapshot.runtimePolicies === undefined
+      ? {}
+      : { runtimePolicies: scopedSnapshot.runtimePolicies }),
   } satisfies NonNullable<ServerProvider["workspaceSnapshots"]>[number];
   return {
     ...provider,
@@ -257,7 +260,13 @@ const mergeProviderModels = (
   // Custom rows are derived from settings and every snapshot carries the full
   // current list, so a custom model missing from `nextModels` was removed by
   // the user and must not be resurrected from the previous snapshot.
-  const retainablePreviousModels = previousModels.filter((model) => !model.isCustom);
+  const retainablePreviousModels = previousModels
+    .filter((model) => !model.isCustom && (provider.driver !== "pi" || model.slug !== "default"))
+    .map((model) =>
+      provider.driver === "pi" && nextModels.some((next) => next.isDefault)
+        ? { ...model, isDefault: false }
+        : model,
+    );
 
   if (shouldRetainMissingModels && nextModels.length === 0 && retainablePreviousModels.length > 0) {
     return retainablePreviousModels;

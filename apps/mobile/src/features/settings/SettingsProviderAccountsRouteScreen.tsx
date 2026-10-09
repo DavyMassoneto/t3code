@@ -41,11 +41,7 @@ export function SettingsProviderAccountsRouteScreen() {
             selectedTargets.map((environment) => (
               <SettingsSection key={environment.environmentId} title={environment.label}>
                 {environment.serverConfig.providers
-                  .filter(
-                    (provider) =>
-                      provider.setup?.canAuthenticate ||
-                      (provider.driver === "acpRegistry" && provider.installed),
-                  )
+                  .filter((provider) => provider.driver === "pi" && provider.setup?.canAuthenticate)
                   .map((provider) => (
                     <ProviderAccount
                       key={provider.instanceId}
@@ -54,9 +50,7 @@ export function SettingsProviderAccountsRouteScreen() {
                     />
                   ))}
                 {!environment.serverConfig.providers.some(
-                  (provider) =>
-                    provider.setup?.canAuthenticate ||
-                    (provider.driver === "acpRegistry" && provider.installed),
+                  (provider) => provider.driver === "pi" && provider.setup?.canAuthenticate,
                 ) ? (
                   <Text className="p-4 text-foreground-muted">
                     Configure a provider with in-app sign-in in web or desktop Settings.

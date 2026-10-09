@@ -5,6 +5,14 @@ import {
 } from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
+  PiPackageError,
+  PiPackageSearchInput,
+  PiPackageSearchResult,
+  PiPackageTarget,
+  PiPackageListResult,
+  PiPackageMutationInput,
+} from "./piPackages.ts";
+import {
   McpAppCallToolInput,
   McpAppCallToolResult,
   McpAppReadResourceInput,
@@ -316,6 +324,12 @@ import {
   ProviderConsumeResetCreditResult,
 } from "./providerUsageLimits.ts";
 import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
+import { PiConnectionsInput, PiConnectionsResult, PiConnectionsError } from "./piConnections.ts";
+import {
+  PiConnectionCredentialsInput,
+  PiConnectionCredentialsResult,
+  PiConnectionCredentialsError,
+} from "./piConnectionCredentials.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
   ScheduledTaskDeleteInput,
@@ -470,6 +484,9 @@ export const WS_METHODS = {
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
+  serverSearchPiPackages: "server.searchPiPackages",
+  serverListPiPackages: "server.listPiPackages",
+  serverMutatePiPackage: "server.mutatePiPackage",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
   serverUninstallAcpRegistryManagedBinary: "server.uninstallAcpRegistryManagedBinary",
   serverAcceptAcpRegistryUrlAuth: "server.acceptAcpRegistryUrlAuth",
@@ -491,6 +508,8 @@ export const WS_METHODS = {
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
+  serverListPiConnections: "server.listPiConnections",
+  serverSetPiConnectionApiKey: "server.setPiConnectionApiKey",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
   // Scheduled tasks
@@ -755,6 +774,24 @@ const WsServerSearchAcpRegistryRpc = Rpc.make(WS_METHODS.serverSearchAcpRegistry
   error: Schema.Union([AcpRegistryOperationError, EnvironmentAuthorizationError]),
 });
 
+const WsServerSearchPiPackagesRpc = Rpc.make(WS_METHODS.serverSearchPiPackages, {
+  payload: PiPackageSearchInput,
+  success: PiPackageSearchResult,
+  error: Schema.Union([PiPackageError, EnvironmentAuthorizationError]),
+});
+
+const WsServerListPiPackagesRpc = Rpc.make(WS_METHODS.serverListPiPackages, {
+  payload: PiPackageTarget,
+  success: PiPackageListResult,
+  error: Schema.Union([PiPackageError, EnvironmentAuthorizationError]),
+});
+
+const WsServerMutatePiPackageRpc = Rpc.make(WS_METHODS.serverMutatePiPackage, {
+  payload: PiPackageMutationInput,
+  success: PiPackageListResult,
+  error: Schema.Union([PiPackageError, EnvironmentAuthorizationError]),
+});
+
 const WsServerPrepareAcpRegistryAgentRpc = Rpc.make(WS_METHODS.serverPrepareAcpRegistryAgent, {
   payload: AcpRegistryPrepareInput,
   success: AcpRegistryPrepareResult,
@@ -798,6 +835,18 @@ const WsServerListAcpRegistryProvidersRpc = Rpc.make(WS_METHODS.serverListAcpReg
   payload: AcpRegistryListProvidersInput,
   success: AcpRegistryListProvidersResult,
   error: Schema.Union([AcpRegistryOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsServerListPiConnectionsRpc = Rpc.make(WS_METHODS.serverListPiConnections, {
+  payload: PiConnectionsInput,
+  success: PiConnectionsResult,
+  error: Schema.Union([PiConnectionsError, EnvironmentAuthorizationError]),
+});
+
+const WsServerSetPiConnectionApiKeyRpc = Rpc.make(WS_METHODS.serverSetPiConnectionApiKey, {
+  payload: PiConnectionCredentialsInput,
+  success: PiConnectionCredentialsResult,
+  error: Schema.Union([PiConnectionCredentialsError, EnvironmentAuthorizationError]),
 });
 
 const WsServerSetAcpRegistryProviderRpc = Rpc.make(WS_METHODS.serverSetAcpRegistryProvider, {
@@ -1830,6 +1879,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerSearchAcpRegistryRpc,
+  WsServerSearchPiPackagesRpc,
+  WsServerListPiPackagesRpc,
+  WsServerMutatePiPackageRpc,
   WsServerPrepareAcpRegistryAgentRpc,
   WsServerUninstallAcpRegistryManagedBinaryRpc,
   WsServerAcceptAcpRegistryUrlAuthRpc,
@@ -1837,6 +1889,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerImportAcpRegistrySessionRpc,
   WsServerDeleteAcpRegistrySessionRpc,
   WsServerListAcpRegistryProvidersRpc,
+  WsServerListPiConnectionsRpc,
+  WsServerSetPiConnectionApiKeyRpc,
   WsServerSetAcpRegistryProviderRpc,
   WsServerDisableAcpRegistryProviderRpc,
   WsServerLogoutAcpRegistryRpc,

@@ -22,7 +22,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
-import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
+import { isWindowsAbsolutePath, normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -241,6 +241,22 @@ const make = Effect.gen(function* () {
         const imported = yield* Effect.gen(function* () {
           const thread = outcome.thread;
           if (
+            thread.source === "pi" &&
+            (!(
+              thread.providerSessionId.startsWith("/") ||
+              isWindowsAbsolutePath(thread.providerSessionId)
+            ) ||
+              !thread.providerSessionId.endsWith(".jsonl") ||
+              thread.providerSessionId !== source.filePath ||
+              source.providerSessionId !== thread.providerSessionId ||
+              source.provider !== "pi")
+          ) {
+            return yield* new AgentSessionUnresumableSessionError({
+              source: thread.source,
+              providerSessionId: thread.providerSessionId,
+            });
+          }
+          if (
             thread.source === "claudeAgent" &&
             !CLAUDE_SESSION_ID_PATTERN.test(thread.providerSessionId)
           ) {
@@ -342,9 +358,11 @@ const make = Effect.gen(function* () {
               status: "stopped",
               lastSeenAt: thread.updatedAt,
               resumeCursor:
-                thread.source === "codex"
-                  ? { threadId: thread.providerSessionId }
-                  : { threadId, resume: thread.providerSessionId },
+                thread.source === "pi"
+                  ? { sessionFile: thread.providerSessionId }
+                  : thread.source === "codex"
+                    ? { threadId: thread.providerSessionId }
+                    : { threadId, resume: thread.providerSessionId },
               runtimePayload: { cwd: project.workspaceRoot },
             },
             { onConflict: "ignore" },

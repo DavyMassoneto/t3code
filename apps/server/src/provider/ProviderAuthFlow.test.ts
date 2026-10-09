@@ -321,6 +321,7 @@ it.effect.each([
       Effect.map(Option.getOrThrow),
     );
     assert.strictEqual(failed.message, message);
+    assert.isFalse(yield* controller.isChangingCredentials!);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

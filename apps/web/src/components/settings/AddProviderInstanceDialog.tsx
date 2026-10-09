@@ -79,7 +79,7 @@ function deriveInstanceId(driver: ProviderDriverKind, label: string): string {
 }
 
 const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
-const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("pi");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const DEFAULT_DRIVER_OPTION = DRIVER_OPTIONS[0]!;
 const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
@@ -140,7 +140,12 @@ export function AddProviderInstanceDialog({
   const [createdInstanceId, setCreatedInstanceId] = useState<ProviderInstanceId | null>(null);
 
   const existingIds = useMemo(() => {
-    const ids = new Set(["codex", "claudeAgent", ...Object.keys(settings.providerInstances ?? {})]);
+    const ids = new Set([
+      "pi",
+      "codex",
+      "claudeAgent",
+      ...Object.keys(settings.providerInstances ?? {}),
+    ]);
     const defaults = DEFAULT_UNIFIED_SETTINGS.providers as Record<string, unknown>;
     // Reserve configured legacy slots too, so adding an account cannot replace them.
     for (const [kind, config] of Object.entries(settings.providers ?? {})) {
@@ -312,7 +317,7 @@ export function AddProviderInstanceDialog({
 
   const handleSave = async () => {
     if (!readEnvironmentScope(environmentId, AuthProvidersManageScope)) return;
-    if (isSaving || createdInstanceId) return;
+    if (driver !== DEFAULT_DRIVER_KIND || isSaving || createdInstanceId) return;
     setHasAttemptedSubmit(true);
     if (instanceIdError !== null || (isAcpRegistry && acpSelectionError !== null)) return;
 
@@ -467,7 +472,7 @@ export function AddProviderInstanceDialog({
                 </RadioGroup>
               </div>
 
-              {wizardStep === 0 ? (
+              {wizardStep === 0 && isAcpRegistry ? (
                 <div className="space-y-4 pt-4">
                   <div className="flex items-center gap-3 text-xs text-muted-foreground">
                     <div aria-hidden className="flex-1 border-t border-border/70" />

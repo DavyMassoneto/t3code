@@ -64,6 +64,16 @@ import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistry.ts";
 import * as ProviderOrchestrationAdapterInfrastructure from "./ProviderOrchestrationAdapterInfrastructure.ts";
+import * as ClaudeAdapterV2 from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import * as CodexAdapterV2 from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as CursorAgentSdk from "../orchestration-v2/Adapters/CursorAgentSdk.ts";
+
+const layerLegacyAdapterInfrastructure = Layer.mergeAll(
+  ProviderOrchestrationAdapterInfrastructure.layer,
+  ClaudeAdapterV2.layerQueryRunner,
+  CodexAdapterV2.layerAppServerClientFactory,
+  CursorAgentSdk.layer,
+);
 
 const layerTestHttpClient = Layer.succeed(
   HttpClient.HttpClient,
@@ -230,9 +240,7 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
   );
-  const layerTest = ProviderOrchestrationAdapterInfrastructure.layer.pipe(
-    Layer.provideMerge(layerBase),
-  );
+  const layerTest = layerLegacyAdapterInfrastructure.pipe(Layer.provideMerge(layerBase));
 
   it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>
     Effect.gen(function* () {
@@ -610,9 +618,7 @@ describe("ProviderInstanceRegistry — all drivers slice", () => {
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
   );
-  const layerTest = ProviderOrchestrationAdapterInfrastructure.layer.pipe(
-    Layer.provideMerge(layerBase),
-  );
+  const layerTest = layerLegacyAdapterInfrastructure.pipe(Layer.provideMerge(layerBase));
 
   it.live("boots one instance of every shipped driver from a single config map", () =>
     Effect.gen(function* () {

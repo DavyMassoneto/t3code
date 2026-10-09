@@ -14,6 +14,10 @@ const trimmedString = (name: string) =>
 const optionalBoolean = (name: string) =>
   Config.Boolean(name).pipe(Config.option, Config.map(Option.getOrElse(() => false)));
 
+export const suppressProtocolRegistration = optionalBoolean(
+  "T3CODE_DESKTOP_SUPPRESS_PROTOCOL_REGISTRATION",
+);
+
 const commaSeparatedStrings = (name: string) =>
   trimmedString(name).pipe(
     Config.map(
@@ -34,6 +38,7 @@ const compactEnv = (env: Readonly<Record<string, string | undefined>>): Record<s
   );
 
 export const DesktopConfig = Config.all({
+  suppressProtocolRegistration,
   appDataDirectory: trimmedString("APPDATA"),
   xdgConfigHome: trimmedString("XDG_CONFIG_HOME"),
   xdgDataHome: trimmedString("XDG_DATA_HOME"),

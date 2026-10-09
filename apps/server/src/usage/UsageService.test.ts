@@ -113,6 +113,7 @@ const layerService = (input: {
       Layer.succeed(HostProcessEnvironment, {
         HOME: input.home,
         GROK_HOME: NodePath.join(input.home, "grok"),
+        PI_CODING_AGENT_DIR: NodePath.join(input.home, "pi"),
         OPENCODE_DATA_DIR: NodePath.join(input.home, "opencode"),
         ANTIGRAVITY_DATA_DIR: NodePath.join(input.home, "antigravity"),
         XDG_CONFIG_HOME: NodePath.join(input.home, "config"),
@@ -227,6 +228,225 @@ function cursorSource(summary: { readonly sources: readonly UsageSource[] }) {
 }
 
 describe("UsageService", () => {
+  it.live.each([
+    { platform: "linux" as const, homeVariable: "HOME", configured: undefined },
+    { platform: "win32" as const, homeVariable: "USERPROFILE", configured: undefined },
+    { platform: "linux" as const, homeVariable: "HOME", configured: "~/pi-custom" },
+    { platform: "win32" as const, homeVariable: "USERPROFILE", configured: "~/pi-custom" },
+  ])(
+    "resolves Pi $homeVariable with agent dir $configured in the native instance home",
+    ({ platform, homeVariable, configured }) =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const instanceHome = NodePath.join(home, "instance-home");
+        const agentHome =
+          configured === undefined
+            ? NodePath.join(instanceHome, ".pi", "agent")
+            : NodePath.join(instanceHome, "pi-custom");
+        yield* Effect.promise(async () => {
+          const directory = NodePath.join(agentHome, "sessions", "project");
+          await NodeFSP.mkdir(directory, { recursive: true });
+          await NodeFSP.writeFile(
+            NodePath.join(directory, "fixture.jsonl"),
+            JSON.stringify({
+              type: "message",
+              id: "instance-response",
+              timestamp: "2026-08-01T10:00:00Z",
+              message: {
+                role: "assistant",
+                provider: "openai",
+                model: "instance-model",
+                usage: { input: 7, output: 3, cost: { total: 0.125 } },
+              },
+            }) + "\n",
+          );
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const summary = yield* service.readSummary(WINDOW);
+          const buckets = summary.buckets.filter((bucket) => bucket.provider === "pi");
+          assert.strictEqual(buckets.length, 1);
+          assert.strictEqual(buckets[0]?.model, "openai/instance-model");
+          assert.strictEqual(buckets[0]?.costUsd, 0.125);
+          const sources = summary.sources.filter((source) => source.fingerprint.provider === "pi");
+          assert.strictEqual(sources.length, 1);
+          assert.strictEqual(sources[0]?.status, "ok");
+          const expectedDirectory = yield* Effect.promise(() =>
+            NodeFSP.realpath(NodePath.join(agentHome, "sessions")),
+          );
+          assert.strictEqual(sources[0]?.fingerprint.resolvedHomePath, expectedDirectory);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            layerService({
+              prefix: "usage-pi-instance-home",
+              home,
+              platform,
+              environment: { PI_CODING_AGENT_DIR: undefined, USERPROFILE: home },
+              settings: {
+                ...settings,
+                providerInstances: {
+                  [ProviderInstanceId.make("pi")]: {
+                    driver: ProviderDriverKind.make("pi"),
+                    environment: [
+                      { name: homeVariable, value: instanceHome, sensitive: false },
+                      ...(configured === undefined
+                        ? []
+                        : [{ name: "PI_CODING_AGENT_DIR", value: configured, sensitive: false }]),
+                    ],
+                  },
+                },
+              },
+            }),
+          ),
+        );
+      }).pipe(Effect.scoped),
+  );
+  it.live(
+    "skips ambiguous relative Pi directories without scanning the host or failing other usage",
+    () =>
+      Effect.gen(function* () {
+        const { home, settings, transcript } = yield* setup;
+        yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const summary = yield* service.readSummary(WINDOW);
+          assert.isFalse(summary.sources.some((source) => source.fingerprint.provider === "pi"));
+          assert.strictEqual(
+            summary.buckets.filter((bucket) => bucket.provider === "claude").length,
+            1,
+          );
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            layerService({
+              prefix: "usage-pi-relative",
+              home,
+              settings,
+              environment: { PI_CODING_AGENT_DIR: "relative-agent" },
+            }),
+          ),
+        );
+      }).pipe(Effect.scoped),
+  );
+  it.live.each([false, true])(
+    "scans Pi instance homes (explicit default: %s) and retains native costs",
+    (explicitDefault) =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const extra = NodePath.join(home, "pi-extra");
+        const roots = [NodePath.join(home, "pi"), extra];
+        yield* Effect.promise(async () => {
+          for (const [index, root] of roots.entries()) {
+            const dir = NodePath.join(root, "sessions", "encoded-project");
+            await NodeFSP.mkdir(dir, { recursive: true });
+            await NodeFSP.writeFile(
+              NodePath.join(dir, "session.jsonl"),
+              [
+                { type: "session", id: `pi-session-${index}` },
+                {
+                  type: "message",
+                  id: `pi-response-${index}`,
+                  timestamp: "2026-08-01T10:00:00Z",
+                  message: {
+                    role: "assistant",
+                    provider: index === 0 ? "anthropic" : "custom",
+                    model: "test-model",
+                    usage: {
+                      input: 10,
+                      output: 20,
+                      cacheRead: 100,
+                      cacheWrite: 30,
+                      cost: { total: index === 0 ? 0.25 : 0 },
+                    },
+                  },
+                },
+              ]
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+          }
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const summary = yield* service.readSummary(WINDOW);
+          const buckets = summary.buckets.filter((bucket) => bucket.provider === "pi");
+          assert.strictEqual(buckets.length, 2);
+          assert.deepStrictEqual(buckets.map((bucket) => bucket.model).sort(), [
+            "anthropic/test-model",
+            "custom/test-model",
+          ]);
+          assert.strictEqual(
+            buckets.reduce((sum, bucket) => sum + bucket.costUsd, 0),
+            0.25,
+          );
+          assert.isTrue(buckets.every((bucket) => bucket.costSource === "providerReported"));
+          assert.isTrue(
+            buckets.every(
+              (bucket) =>
+                bucket.totals.cachedInputTokens === 100 && bucket.totals.uncachedInputTokens === 10,
+            ),
+          );
+          assert.strictEqual(
+            summary.sources.filter((source) => source.fingerprint.provider === "pi").length,
+            2,
+          );
+          yield* Effect.promise(() =>
+            NodeFSP.rename(
+              NodePath.join(extra, "sessions"),
+              NodePath.join(extra, "removed-sessions"),
+            ),
+          );
+          const retained = yield* service.readSummary({
+            ...WINDOW,
+            untilDay: UsageDay.make("2026-08-03"),
+          });
+          assert.strictEqual(
+            retained.buckets.filter((bucket) => bucket.provider === "pi").length,
+            2,
+          );
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            layerService({
+              prefix: "usage-pi",
+              home,
+              environment: explicitDefault
+                ? { PI_CODING_AGENT_DIR: NodePath.join(home, "ignored-pi") }
+                : {},
+              settings: {
+                ...settings,
+                providerInstances: {
+                  ...(explicitDefault
+                    ? {
+                        [ProviderInstanceId.make("pi")]: {
+                          driver: ProviderDriverKind.make("pi"),
+                          enabled: false,
+                          environment: [
+                            { name: "PI_CODING_AGENT_DIR", value: roots[0]!, sensitive: false },
+                          ],
+                        },
+                      }
+                    : {}),
+                  [ProviderInstanceId.make("pi-extra")]: {
+                    driver: ProviderDriverKind.make("pi"),
+                    displayName: "Extra Pi",
+                    enabled: false,
+                    environment: [{ name: "PI_CODING_AGENT_DIR", value: extra, sensitive: false }],
+                  },
+                  [ProviderInstanceId.make("pi-alias")]: {
+                    driver: ProviderDriverKind.make("pi"),
+                    displayName: "Same Pi",
+                    enabled: false,
+                    environment: [{ name: "PI_CODING_AGENT_DIR", value: extra, sensitive: false }],
+                  },
+                },
+              },
+            }),
+          ),
+        );
+      }).pipe(Effect.scoped),
+  );
   it.live.each([
     { explicitDefault: true, label: "explicit" },
     { explicitDefault: false, label: "legacy" },

@@ -1,6 +1,13 @@
 import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
-import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
+import { RuntimePolicySelect } from "./RuntimePolicySelect";
+import { shouldRequestWorkspaceDiscovery } from "./workspaceDiscovery";
+import {
+  resolveRuntimePolicyPicker,
+  resolveMultiModelRuntimePolicySelection,
+  selectRuntimePolicyChoice,
+  type RuntimePolicyChoice,
+} from "./runtimePolicySelection";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -45,7 +52,6 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
-  PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import {
@@ -101,7 +107,6 @@ import {
 } from "./composerMentionDrag";
 import {
   composerFloatingLayerProps,
-  useComposerMenuProps,
   isInsideCollapsedComposerControls,
   isInsideRestingComposerControlScope,
 } from "./composerEventScope";
@@ -129,7 +134,6 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
-import { useComposerMenuState } from "./useComposerMenuState";
 import { useComposerTriggerState } from "./useComposerTriggerState";
 import { useComposerFocusState } from "./useComposerFocusState";
 import { useComposerMultilinePrompt } from "./useComposerMultilinePrompt";
@@ -273,12 +277,7 @@ import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
-import {
-  ComposerControl,
-  ComposerControlIcon,
-  ComposerControlSeparator,
-  ComposerSelectControl,
-} from "./ComposerControl";
+import { ComposerControl, ComposerControlIcon, ComposerControlSeparator } from "./ComposerControl";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { buildPullRequestReferenceContext } from "../pullRequest/pullRequestDetail.logic";
 import {
@@ -1076,7 +1075,6 @@ function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children:
   );
 }
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
@@ -1231,29 +1229,19 @@ function useRestingComposerControlsLayout(host: HTMLDivElement | null, useContro
   };
 }
 
-type RuntimeModeOption = { mode: RuntimeMode } & (typeof runtimeModeConfig)[RuntimeMode];
-const runtimeModeOptions = runtimeModes.map((mode) => ({ mode, ...runtimeModeConfig[mode] }));
-const supervisedRuntimeModeOption = {
-  mode: "approval-required" as const,
-  ...runtimeModeConfig["approval-required"],
-};
 const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
-  runtimeMode: RuntimeMode;
-  runtimeModeOptions: ReadonlyArray<RuntimeModeOption>;
+  runtimeMode: string;
+  runtimeModeOptions: ReadonlyArray<RuntimePolicyChoice>;
+  runtimePolicyDisabled?: boolean;
   size?: "sm" | "xs";
   hidden?: boolean;
   onToggleInteractionMode: () => void;
-  onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onRuntimeModeChange: (value: string) => void;
+  onRuntimePolicyOpen?: () => void;
 }) {
   const size = props.size ?? "sm";
-  const composerFloatingLayerProps = useComposerMenuProps();
-  const [open, setOpen] = useComposerMenuState(props.hidden);
-  const runtimeModeOption =
-    props.runtimeModeOptions.find((option) => option.mode === props.runtimeMode) ??
-    supervisedRuntimeModeOption;
-  const RuntimeModeIcon = runtimeModeOption.icon;
   const interactionModeTooltip =
     props.interactionMode === "plan"
       ? "Plan mode — click to return to normal build mode"
@@ -1301,53 +1289,15 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
     <>
       <ComposerControlSeparator size={size} />
 
-      <Tooltip>
-        <Select
-          open={open}
-          onOpenChange={setOpen}
-          value={props.runtimeMode}
-          onValueChange={(value) => props.onRuntimeModeChange(value!)}
-        >
-          <TooltipTrigger
-            render={
-              <ComposerSelectControl
-                data-composer-shortcut="composer.mode"
-                size={size}
-                aria-label="Runtime mode"
-              />
-            }
-          >
-            <ComposerControlIcon icon={RuntimeModeIcon} size={size} />
-            <SelectValue data-composer-control-label>{runtimeModeOption.label}</SelectValue>
-          </TooltipTrigger>
-          <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-            {props.runtimeModeOptions.map((option) => {
-              const OptionIcon = option.icon;
-              return (
-                <SelectItem
-                  key={option.mode}
-                  value={option.mode}
-                  hideIndicator
-                  className="min-w-64"
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="grid min-w-0 flex-1 gap-0.5">
-                      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                        <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                        {option.label}
-                      </span>
-                      <span className="text-muted-foreground text-xs leading-4">
-                        {option.description}
-                      </span>
-                    </div>
-                  </div>
-                </SelectItem>
-              );
-            })}
-          </SelectPopup>
-        </Select>
-        <TooltipPopup side="top">{runtimeModeOption.description}</TooltipPopup>
-      </Tooltip>
+      <RuntimePolicySelect
+        value={props.runtimeMode}
+        choices={props.runtimeModeOptions}
+        disabled={props.runtimePolicyDisabled}
+        hidden={props.hidden}
+        size={size}
+        onValueChange={props.onRuntimeModeChange}
+        onOpen={props.onRuntimePolicyOpen}
+      />
 
       {interactionModeToggle}
     </>
@@ -1691,7 +1641,7 @@ export interface ChatComposerProps {
   onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
   toggleInteractionMode: () => void;
-  handleRuntimeModeChange: (mode: RuntimeMode) => void;
+  handleRuntimeModeChange: (mode: RuntimeMode, modelSelection: ModelSelection) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
 
   focusComposer: () => void;
@@ -2158,19 +2108,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // disabled.
   const selectedProvider: ProviderDriverKind =
     selectedProviderEntry?.driverKind ?? requestedDriverKind;
-  const supportedRuntimeModes = selectedProviderEntry?.snapshot.supportedRuntimeModes;
-  const compatibleRuntimeModeOptions =
-    supportedRuntimeModes && supportedRuntimeModes.length > 0
-      ? runtimeModeOptions.filter((option) => supportedRuntimeModes.includes(option.mode))
-      : runtimeModeOptions;
-  // Older threads can contain a mode their current provider no longer offers.
-  // Display the provider's first supported mode, which is also its safe legacy
-  // fallback, without mutating persisted state until the user makes a choice.
-  const compatibleRuntimeMode = compatibleRuntimeModeOptions.some(
-    (option) => option.mode === runtimeMode,
-  )
-    ? runtimeMode
-    : (compatibleRuntimeModeOptions[0]?.mode ?? runtimeMode);
 
   const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
     threadRef: composerDraftTarget,
@@ -2185,8 +2122,54 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderEntry?.snapshot,
     selectedModel,
   );
+  const runtimePolicySelection = createModelSelection(
+    selectedInstanceId,
+    selectedModel,
+    composerModelOptions?.[selectedInstanceId],
+  );
+  const runtimePolicyPicker = resolveRuntimePolicyPicker(
+    selectedProviderEntry?.snapshot,
+    runtimeMode,
+    runtimePolicySelection,
+    gitCwd,
+  );
+  const multiModelRuntimePolicy = resolveMultiModelRuntimePolicySelection(
+    runtimePolicySelection,
+    runtimeMode,
+    multipleModelSelections,
+  );
+  const hasAmbiguousPolicyInstances =
+    multipleModelSelections?.some((selection) => selection.instanceId !== selectedInstanceId) ??
+    false;
+  const runtimePolicyChoices = runtimePolicyPicker.choices.map((choice) =>
+    hasAmbiguousPolicyInstances && choice.value.startsWith("policy:")
+      ? {
+          ...choice,
+          disabled: true,
+          description: "Runtime policies require all selected models to use the same Pi instance.",
+        }
+      : choice,
+  );
+  const runtimePolicyDisabled = !canOperateThread || isSendBusy || canInterrupt || isConnecting;
+  const handleRuntimePolicyChoice = (value: string) => {
+    if (runtimePolicyDisabled) return;
+    if (hasAmbiguousPolicyInstances && value.startsWith("policy:")) return;
+    const next = selectRuntimePolicyChoice(
+      selectedProviderEntry?.snapshot,
+      createModelSelection(
+        selectedInstanceId,
+        selectedModel,
+        composerModelOptions?.[selectedInstanceId],
+      ),
+      value,
+      gitCwd,
+    );
+    if (next) handleRuntimeModeChange(next.runtimeMode, next.modelSelection);
+  };
   const sendDisabledReason =
     externalSendDisabledReason ??
+    runtimePolicyPicker.blockedReason ??
+    multiModelRuntimePolicy.blockedReason ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
     (activePendingProgress
       ? attachmentBlockReason
@@ -2217,6 +2200,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // The last scan this composer asked for. A request inside the TTL is not
   // repeated, so a client clock ahead of the server's cannot loop rescans.
   const workspaceRefreshKeyRef = useRef<{ key: string; requestedAt: number } | null>(null);
+  const [runtimePolicyDiscoveryRequest, setRuntimePolicyDiscoveryRequest] = useState(0);
+  const handledRuntimePolicyDiscoveryRequestRef = useRef(0);
+  const workspaceDiscoveryInFlightRef = useRef(new Set<string>());
+  const requestRuntimePolicyDiscovery = () =>
+    setRuntimePolicyDiscoveryRequest((request) => request + 1);
   const [workspaceRefreshRetry, setWorkspaceRefreshRetry] = useState<{
     key: string;
     notBefore: number;
@@ -2257,23 +2245,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     hadWorkspaceSnapshotRef.current = hasWorkspaceSnapshot;
   }, [gitCwd, selectedProviderStatus]);
   useEffect(() => {
+    const force = runtimePolicyDiscoveryRequest !== handledRuntimePolicyDiscoveryRequestRef.current;
+    handledRuntimePolicyDiscoveryRequestRef.current = runtimePolicyDiscoveryRequest;
     if (!gitCwd || !selectedProviderEntry) return;
     const key = `${environmentId}:${selectedProviderEntry.instanceId}:${gitCwd}`;
     const now = Date.now();
     const lastRequest = workspaceRefreshKeyRef.current;
+    const hasCurrentSnapshot = hasCurrentProviderWorkspaceSnapshot(
+      selectedProviderStatus,
+      gitCwd,
+      now,
+    );
+    if (!force && hasCurrentSnapshot) {
+      setWorkspaceRefreshRetry(null);
+    }
     if (
-      lastRequest?.key === key &&
-      now - lastRequest.requestedAt < PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS
+      !shouldRequestWorkspaceDiscovery({
+        force,
+        inFlight: workspaceDiscoveryInFlightRef.current.has(key),
+        hasCurrentSnapshot,
+        key,
+        now,
+        lastRequest,
+        retry: workspaceRefreshRetry,
+      })
     )
       return;
-    if (hasCurrentProviderWorkspaceSnapshot(selectedProviderStatus, gitCwd, now)) {
-      setWorkspaceRefreshRetry(null);
-      return;
-    }
-    const retry = workspaceRefreshRetry;
-    if (retry?.key === key && now < retry.notBefore) return;
     const request = { key, requestedAt: now };
     workspaceRefreshKeyRef.current = request;
+    const inFlight = workspaceDiscoveryInFlightRef.current;
+    inFlight.add(key);
     const retryLater = () => {
       if (workspaceRefreshKeyRef.current !== request) return;
       workspaceRefreshKeyRef.current = null;
@@ -2284,18 +2285,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     };
     void refreshProviders({
       environmentId,
-      input: { instanceId: selectedProviderEntry.instanceId, cwd: gitCwd },
-    }).then((result) => {
-      const hasWorkspaceSnapshot =
-        result._tag === "Success" &&
-        hasCompleteProviderWorkspaceSnapshot(
-          result.value.providers.find(
-            (provider) => provider.instanceId === selectedProviderEntry.instanceId,
-          ),
-          gitCwd,
-        );
-      if (!hasWorkspaceSnapshot) retryLater();
-    }, retryLater);
+      input: {
+        instanceId: selectedProviderEntry.instanceId,
+        cwd: gitCwd,
+        ...(force ? { fresh: true } : {}),
+      },
+    })
+      .then((result) => {
+        const hasWorkspaceSnapshot =
+          result._tag === "Success" &&
+          hasCompleteProviderWorkspaceSnapshot(
+            result.value.providers.find(
+              (provider) => provider.instanceId === selectedProviderEntry.instanceId,
+            ),
+            gitCwd,
+          );
+        if (!hasWorkspaceSnapshot) retryLater();
+      }, retryLater)
+      .finally(() => inFlight.delete(key));
   }, [
     environmentId,
     gitCwd,
@@ -2303,6 +2310,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     refreshProviders,
     selectedProviderEntry,
     workspaceRefreshRetry,
+    runtimePolicyDiscoveryRequest,
   ]);
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
@@ -5444,12 +5452,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         <ComposerFooterModeControls
           showInteractionModeToggle={planModeUiEnabled}
           interactionMode={interactionMode}
-          runtimeMode={compatibleRuntimeMode}
-          runtimeModeOptions={compatibleRuntimeModeOptions}
+          runtimeMode={runtimePolicyPicker.value}
+          runtimeModeOptions={runtimePolicyChoices}
+          runtimePolicyDisabled={runtimePolicyDisabled}
           size={composerControlsCollapsed ? "xs" : "sm"}
           hidden={composerControlsHidden || restingHiddenBlockCount > 0}
           onToggleInteractionMode={toggleInteractionMode}
-          onRuntimeModeChange={handleRuntimeModeChange}
+          onRuntimeModeChange={handleRuntimePolicyChoice}
+          onRuntimePolicyOpen={requestRuntimePolicyDiscovery}
         />
       ),
     },
@@ -5606,8 +5616,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         >
           <CompactComposerControlsMenu
             interactionMode={interactionMode}
-            runtimeMode={compatibleRuntimeMode}
-            runtimeModeOptions={compatibleRuntimeModeOptions}
+            runtimeMode={runtimePolicyPicker.value}
+            runtimeModeOptions={runtimePolicyChoices}
+            runtimePolicyDisabled={runtimePolicyDisabled}
             size={composerControlsCollapsed ? "xs" : "sm"}
             hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
             showInteractionModeToggle={planModeUiEnabled && hiddenRestingBlockIds.includes("mode")}
@@ -5615,7 +5626,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
             }
             onToggleInteractionMode={toggleInteractionMode}
-            onRuntimeModeChange={handleRuntimeModeChange}
+            onRuntimeModeChange={handleRuntimePolicyChoice}
+            onRuntimePolicyOpen={requestRuntimePolicyDiscovery}
           />
         </div>
       </>
@@ -6530,8 +6542,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedModelOptionsForDispatch,
         selectedModelSelection,
         multipleModelSelections:
-          routeKind === "draft" && multipleModelSelections !== null
-            ? multipleModelSelections.map((selection) =>
+          routeKind === "draft" && multiModelRuntimePolicy.selections !== null
+            ? multiModelRuntimePolicy.selections.map((selection) =>
                 selection.instanceId === selectedModelSelection.instanceId &&
                 selection.model === selectedModelSelection.model
                   ? selectedModelSelection
@@ -6539,8 +6551,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )
             : null,
         providerAvailable:
-          multipleModelSelections !== null ||
-          (!noProviderAvailable && providerSendBlockReason === null),
+          runtimePolicyPicker.blockedReason === null &&
+          multiModelRuntimePolicy.blockedReason === null &&
+          (multipleModelSelections !== null ||
+            (!noProviderAvailable && providerSendBlockReason === null)),
         selectedProvider,
         selectedModel,
         selectedProviderModels,
@@ -6598,6 +6612,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       routeKind,
       noProviderAvailable,
       providerSendBlockReason,
+      runtimePolicyPicker.blockedReason,
+      multiModelRuntimePolicy.selections,
+      multiModelRuntimePolicy.blockedReason,
       selectedPromptEffort,
       selectedProvider,
       selectedProviderModels,

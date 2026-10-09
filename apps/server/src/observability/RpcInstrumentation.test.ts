@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   AuthEnvironmentMaintainScope,
   AuthOrchestrationReadScope,
+  AuthProvidersManageScope,
+  ProviderInstanceId,
   type AuthEnvironmentScope,
   ScheduledTaskError,
   ScheduledTaskId,
@@ -16,6 +18,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import * as RpcTest from "effect/rpc/RpcTest";
@@ -102,6 +105,35 @@ const requestDuration = (snapshots: ReadonlyArray<Metric.Metric.Snapshot>, metho
   )?.state;
 
 describe("WS RPC instrumentation middleware", () => {
+  it.effect("attributes native Pi discovery to server without payload annotations", () =>
+    withTelemetry((ended) =>
+      Effect.gen(function* () {
+        const group = groupOf(WS_METHODS.serverListPiConnections);
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              group.toLayerHandler(WS_METHODS.serverListPiConnections, (input) =>
+                Effect.succeed({ instanceId: input.instanceId, connections: [] }),
+              ),
+              connectionMiddleware([AuthProvidersManageScope]),
+            ),
+          ),
+        );
+        yield* client[WS_METHODS.serverListPiConnections]({
+          instanceId: ProviderInstanceId.make("pi-private-instance"),
+        });
+        const span = rpcSpans(ended).find(
+          (candidate) => candidate.name === `ws.rpc.${WS_METHODS.serverListPiConnections}`,
+        );
+        assert.strictEqual(span?.attributes.get("rpc.aggregate"), "server");
+        assert.strictEqual(exitTag(span), "Success");
+        assert.notInclude(
+          JSON.stringify(Array.from(span?.attributes ?? [])),
+          "pi-private-instance",
+        );
+      }),
+    ),
+  );
   it.effect("records one span and request metric per call, including rejected calls", () =>
     withTelemetry((ended) =>
       Effect.gen(function* () {
@@ -330,6 +362,44 @@ describe("WS RPC instrumentation middleware", () => {
         assert.deepStrictEqual(appSpans(ended), []);
         const snapshots = yield* Metric.snapshot;
         assert.equal(requestCount(snapshots, WS_METHODS.serverSignalProcess, "success")?.count, 1);
+      }),
+    ),
+  );
+
+  it.effect("never traces native API key writes or their child effects", () =>
+    withTelemetry((ended) =>
+      Effect.gen(function* () {
+        const group = groupOf(WS_METHODS.serverSetPiConnectionApiKey);
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              group.toLayerHandler(WS_METHODS.serverSetPiConnectionApiKey, (input) =>
+                Effect.succeed({
+                  instanceId: input.instanceId,
+                  service: input.service,
+                  configured: true as const,
+                }).pipe(
+                  Effect.withSpan("credential.child", {
+                    attributes: { synthetic: "must-not-be-recorded" },
+                  }),
+                ),
+              ),
+              connectionMiddleware([AuthProvidersManageScope]),
+            ),
+          ),
+        );
+        yield* client[WS_METHODS.serverSetPiConnectionApiKey]({
+          instanceId: ProviderInstanceId.make("pi-fixture"),
+          service: "anthropic",
+          apiKey: Redacted.make("synthetic-key-only"),
+          consent: true,
+        });
+        assert.deepStrictEqual(appSpans(ended), []);
+        assert.equal(
+          requestCount(yield* Metric.snapshot, WS_METHODS.serverSetPiConnectionApiKey, "success")
+            ?.count,
+          1,
+        );
       }),
     ),
   );

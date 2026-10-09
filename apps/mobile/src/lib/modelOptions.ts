@@ -1,4 +1,5 @@
 import type { MenuAction } from "@react-native-menu/menu";
+import { isInteractiveProvider } from "@t3tools/client-runtime/provider-policy";
 import type {
   ModelCapabilities,
   ModelSelection,
@@ -83,7 +84,7 @@ export function isModelSelectionUnavailable(
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
   return (
-    driver === "antigravity" &&
+    (driver === "antigravity" || driver === "pi") &&
     (!provider ||
       !provider.enabled ||
       !provider.installed ||
@@ -135,6 +136,8 @@ export function resolveDefaultableModelSelection(
     return usable;
   }
   const provider = config.providers.find((candidate) => candidate.instanceId === usable.instanceId);
+  if (!isInteractiveProvider(provider?.driver) || isModelSelectionUnavailable(config, usable))
+    return null;
   const model = provider?.models.find((candidate) => candidate.slug === usable.model);
   return provider?.driver !== "antigravity" && model?.isLegacy === true ? null : usable;
 }
@@ -145,12 +148,24 @@ export function resolveNewTaskModelSelection(input: {
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
 }): ModelSelection | null {
+  const options = input.modelOptions.filter(
+    (option) => isInteractiveProvider(option.providerDriver) && !option.isUnavailable,
+  );
+  const usableSelection = (selection: ModelSelection | null): ModelSelection | null =>
+    selection &&
+    options.some(
+      (option) =>
+        option.selection.instanceId === selection.instanceId &&
+        option.selection.model === selection.model,
+    )
+      ? selection
+      : null;
   return (
-    input.draftSelection ??
-    input.projectDefaultSelection ??
-    input.stickySelection ??
-    input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
-    input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
+    usableSelection(input.draftSelection) ??
+    usableSelection(input.projectDefaultSelection) ??
+    usableSelection(input.stickySelection) ??
+    options.find((option) => option.isDefault)?.selection ??
+    options[0]?.selection ??
     null
   );
 }
@@ -164,11 +179,12 @@ export function buildModelOptions(
 
   for (const provider of config?.providers ?? []) {
     if (
+      !isInteractiveProvider(provider.driver) ||
       (providerInstanceId !== undefined && provider.instanceId !== providerInstanceId) ||
       !provider.enabled ||
       !provider.installed ||
       provider.auth.status === "unauthenticated" ||
-      (provider.driver === "antigravity" && provider.availability === "unavailable")
+      provider.availability === "unavailable"
     ) {
       continue;
     }
@@ -254,6 +270,7 @@ export function buildModelOptions(
 export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyArray<ProviderGroup> {
   const groups = new Map<string, { providerLabel: string; models: ModelOption[] }>();
   for (const option of options) {
+    if (!isInteractiveProvider(option.providerDriver)) continue;
     const existing = groups.get(option.providerKey);
     if (existing) {
       existing.models.push(option);

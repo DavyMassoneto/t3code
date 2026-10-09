@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
+  DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   ModelSelection,
   ProjectId,
   ProjectScript,
@@ -9,6 +10,7 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  ServerSettingsError,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, it } from "@effect/vitest";
@@ -31,6 +33,7 @@ import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import { writeFileStringAtomically } from "./atomicWrite.ts";
 import * as ServerSettingsModule from "./serverSettings.ts";
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
+import { PiNativeDefaults } from "./provider/PiNativeDefaults.ts";
 
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
@@ -97,6 +100,166 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect(
+    "publishes external native default refreshes without writing settings or changing profiles",
+    () => {
+      const instanceId = ProviderInstanceId.make("refresh-native-profile");
+      const otherInstanceId = ProviderInstanceId.make("refresh-other-profile");
+      const projectId = ProjectId.make("refresh-project");
+      let actualModel = "anthropic/initial";
+      let cachedModel: string | undefined;
+      let nativeWrites = 0;
+      const native = Layer.succeed(PiNativeDefaults, {
+        invalidate: Effect.sync(() => {
+          cachedModel = undefined;
+        }),
+        read: (settings) =>
+          Effect.sync(() => {
+            cachedModel ??= actualModel;
+            return { ...settings, defaultModelSelection: { instanceId, model: cachedModel } };
+          }),
+        write: () =>
+          Effect.sync(() => {
+            nativeWrites += 1;
+          }),
+      });
+      return Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const persisted = yield* service.updateSettings({
+          defaultModelSelection: { instanceId, model: "anthropic/initial" },
+          defaultAutoPull: true,
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("pi"),
+              enabled: true,
+              config: {},
+              environment: [
+                {
+                  name: "PI_CODING_AGENT_DIR",
+                  value: "/isolated/selected-profile",
+                  sensitive: false,
+                },
+              ],
+            },
+            [otherInstanceId]: {
+              driver: ProviderDriverKind.make("pi"),
+              enabled: true,
+              config: {},
+              environment: [
+                { name: "PI_CODING_AGENT_DIR", value: "/isolated/other-profile", sensitive: false },
+              ],
+            },
+          },
+          projectSettingsOverrides: { [projectId]: { defaultAutoPull: false } },
+        });
+        const originalSettingsFile = yield* fs.readFileString(config.settingsPath);
+        const writesBeforeRefresh = nativeWrites;
+        const changes = yield* service.subscribeChanges;
+        actualModel = "anthropic/external";
+        assert.equal(
+          (yield* service.getSettings).defaultModelSelection?.model,
+          "anthropic/initial",
+        );
+        yield* service.refreshNativeDefaults ?? Effect.void;
+        const notification = yield* Stream.runHead(changes);
+        assert.isTrue(Option.isSome(notification));
+        const refreshed = Option.getOrThrow(notification);
+        assert.deepEqual(refreshed.defaultModelSelection, {
+          instanceId,
+          model: "anthropic/external",
+        });
+        assert.deepEqual(refreshed.providerInstances, persisted.providerInstances);
+        assert.deepEqual(refreshed.projectSettingsOverrides, persisted.projectSettingsOverrides);
+        assert.isTrue(refreshed.defaultAutoPull);
+        assert.equal(
+          (yield* service.getSettings).defaultModelSelection?.model,
+          "anthropic/external",
+        );
+        assert.equal(nativeWrites, writesBeforeRefresh);
+        assert.equal(yield* fs.readFileString(config.settingsPath), originalSettingsFile);
+      }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provide(native))), Effect.scoped);
+    },
+  );
+  it.effect(
+    "routes Pi defaults through native settings and never saves a shadow after native failure",
+    () => {
+      const instanceId = ProviderInstanceId.make("native-settings-profile");
+      const projectId = ProjectId.make("native-settings-project");
+      let actualModel = "anthropic/native";
+      let failWrites = false;
+      let writes = 0;
+      let invalidations = 0;
+      const native = Layer.succeed(PiNativeDefaults, {
+        invalidate: Effect.sync(() => {
+          invalidations += 1;
+        }),
+        read: (settings) =>
+          Effect.succeed({
+            ...settings,
+            defaultModelSelection: { instanceId, model: actualModel },
+          }),
+        write: (_settings, patch, workspaces) =>
+          Effect.gen(function* () {
+            writes += 1;
+            assert.equal(workspaces[projectId], "/isolated/native-settings-project");
+            if (failWrites)
+              return yield* new ServerSettingsError({
+                settingsPath: "fixture-native-settings",
+                operation: "write-file",
+              });
+            if (patch.defaultModelSelection) actualModel = patch.defaultModelSelection.model;
+          }),
+      });
+      return Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+        INSERT INTO projection_projects (project_id, title, workspace_root, auto_pull, scripts_json, created_at, updated_at)
+        VALUES (${projectId}, ${"Native defaults"}, ${"/isolated/native-settings-project"}, ${0}, ${"[]"}, ${"2026-10-09T00:00:00.000Z"}, ${"2026-10-09T00:00:00.000Z"})
+      `;
+        const updated = yield* service.updateSettings({
+          defaultModelSelection: { instanceId, model: "openai/selected" },
+          defaultAutoPull: true,
+        });
+        assert.equal(updated.defaultModelSelection?.model, "openai/selected");
+        assert.isTrue(updated.defaultAutoPull);
+        actualModel = "anthropic/external";
+        assert.equal(
+          (yield* service.getSettings).defaultModelSelection?.model,
+          "anthropic/external",
+        );
+        assert.equal(
+          (yield* service.withSettingsSnapshot((settings) => Effect.succeed(settings)))
+            .defaultModelSelection?.model,
+          "anthropic/external",
+        );
+        yield* service.refreshNativeDefaults ?? Effect.void;
+        assert.isAbove(invalidations, 0);
+        const beforeFailure = yield* fs.readFileString(config.settingsPath);
+        failWrites = true;
+        const failure = yield* service
+          .updateSettings({
+            defaultModelSelection: { instanceId, model: "openai/denied" },
+            defaultAutoPull: false,
+          })
+          .pipe(Effect.flip);
+        assert.equal(failure._tag, "ServerSettingsError");
+        assert.equal(yield* fs.readFileString(config.settingsPath), beforeFailure);
+        assert.isTrue((yield* service.getSettings).defaultAutoPull);
+        failWrites = false;
+        yield* service.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: { defaultModelSelection: { instanceId, model: "openai/project" } },
+          },
+        });
+        assert.equal(writes, 3);
+      }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provide(native))));
+    },
+  );
   it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
@@ -376,10 +539,12 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       yield* serverSettings.updateSettings({
         providers: {
           codex: {
+            enabled: true,
             binaryPath: "/usr/local/bin/codex",
             homePath: "/Users/julius/.codex",
           },
           claudeAgent: {
+            enabled: true,
             binaryPath: "/usr/local/bin/claude",
             customModels: ["claude-custom"],
           },
@@ -514,6 +679,63 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("releases a cancelled snapshot lock for queued settings and instance writes", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const initial = yield* serverSettings.getSettings;
+      yield* serverSettings.updateSettings({
+        enableAgentBrowserAccess: initial.enableAgentBrowserAccess,
+      });
+      const before = yield* fs.readFileString(config.settingsPath);
+      const entered = yield* Deferred.make<void>();
+      const settingsWritten = yield* Deferred.make<void>();
+      const instanceWritten = yield* Deferred.make<void>();
+      const instanceId = ProviderInstanceId.make("acpRegistry_cancelled_snapshot");
+      const snapshotFiber = yield* serverSettings
+        .withSettingsSnapshot(() =>
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+        )
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(entered);
+      const settingsFiber = yield* serverSettings
+        .updateSettings({
+          enableAgentBrowserAccess: !initial.enableAgentBrowserAccess,
+        })
+        .pipe(
+          Effect.tap(() => Deferred.succeed(settingsWritten, undefined)),
+          Effect.forkChild({ startImmediately: true }),
+        );
+      const instanceFiber = yield* serverSettings
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: {
+            driver: ProviderDriverKind.make("acpRegistry"),
+            displayName: "Queued fixture",
+            config: { agentId: "synthetic", distribution: "auto" },
+          },
+        })
+        .pipe(
+          Effect.tap(() => Deferred.succeed(instanceWritten, undefined)),
+          Effect.forkChild({ startImmediately: true }),
+        );
+      yield* Effect.yieldNow;
+      assert.isTrue(Option.isNone(yield* Deferred.poll(settingsWritten)));
+      assert.isTrue(Option.isNone(yield* Deferred.poll(instanceWritten)));
+      assert.equal(yield* fs.readFileString(config.settingsPath), before);
+      yield* Fiber.interrupt(snapshotFiber);
+      yield* Fiber.join(settingsFiber);
+      yield* Fiber.join(instanceFiber);
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.equal(persisted.enableAgentBrowserAccess, !initial.enableAgentBrowserAccess);
+      assert.equal(persisted.providerInstances[instanceId]?.displayName, "Queued fixture");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("buffers changes after a subscription is acquired but before it is consumed", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -596,6 +818,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       // Start with Claude text generation selection
       yield* serverSettings.updateSettings({
+        providers: { codex: { enabled: true }, claudeAgent: { enabled: true } },
         textGenerationModelSelection: {
           instanceId: ProviderInstanceId.make("claudeAgent"),
           model: "claude-sonnet-4-6",
@@ -731,7 +954,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           });
           const fallbackSelection = {
             instanceId: fallbackInstanceId,
-            model: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
+            model: DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[ProviderDriverKind.make(fallbackId)],
           };
           assert.deepEqual(next.textGenerationModelSelection, fallbackSelection);
           assert.deepEqual(
@@ -767,7 +990,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         },
       });
 
-      assert.equal(next.textGenerationModelSelection.instanceId, "claudeAgent");
+      assert.equal(next.textGenerationModelSelection.instanceId, "pi");
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
@@ -1007,8 +1230,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const serverConfig = yield* ServerConfig.ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-      // The Providers UI writes providerInstances only, so the legacy providers
-      // map decodes to defaults where codex is enabled and listed first.
       yield* fileSystem.writeFileString(
         serverConfig.settingsPath,
         '{"providerInstances":{"codex":{"driver":"codex","enabled":false,"config":{}}}}',
@@ -1016,7 +1237,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       const settings = yield* serverSettings.getSettings;
 
-      assert.equal(settings.textGenerationModelSelection.instanceId, "claudeAgent");
+      assert.equal(settings.textGenerationModelSelection.instanceId, "pi");
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
@@ -1274,7 +1495,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       });
 
       assert.deepEqual(next.providers.codex, {
-        enabled: true,
+        enabled: false,
         binaryPath: "/opt/homebrew/bin/codex",
         homePath: "",
         shadowHomePath: "",
@@ -1282,7 +1503,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         customModels: [],
       });
       assert.deepEqual(next.providers.claudeAgent, {
-        enabled: true,
+        enabled: false,
         binaryPath: "/opt/homebrew/bin/claude",
         homePath: "",
         customModels: [],

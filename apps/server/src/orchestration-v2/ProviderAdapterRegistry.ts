@@ -102,6 +102,7 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
                     : [instance];
                   for (const instance of related) {
                     if (
+                      instance.auth?.affectsInference !== false &&
                       instance.auth?.isChangingCredentials &&
                       (yield* instance.auth.isChangingCredentials)
                     )
@@ -118,7 +119,8 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
                   > = adapter.openSession(input);
                   // Shared credential changes must interrupt a peer's startup too.
                   for (const peer of related) {
-                    if (peer.auth?.withAccess) admitted = peer.auth.withAccess(admitted);
+                    if (peer.auth?.affectsInference !== false && peer.auth?.withAccess)
+                      admitted = peer.auth.withAccess(admitted);
                   }
                   return yield* admitted;
                 });

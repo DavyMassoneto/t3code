@@ -57,6 +57,9 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverGetSettings]: "server",
   [WS_METHODS.serverUpdateSettings]: "server",
   [WS_METHODS.serverSearchAcpRegistry]: "server",
+  [WS_METHODS.serverSearchPiPackages]: "server",
+  [WS_METHODS.serverListPiPackages]: "server",
+  [WS_METHODS.serverMutatePiPackage]: "server",
   [WS_METHODS.serverPrepareAcpRegistryAgent]: "server",
   [WS_METHODS.serverUninstallAcpRegistryManagedBinary]: "server",
   [WS_METHODS.serverAcceptAcpRegistryUrlAuth]: "server",
@@ -64,6 +67,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverImportAcpRegistrySession]: "server",
   [WS_METHODS.serverDeleteAcpRegistrySession]: "server",
   [WS_METHODS.serverListAcpRegistryProviders]: "server",
+  [WS_METHODS.serverListPiConnections]: "server",
+  [WS_METHODS.serverSetPiConnectionApiKey]: "server",
   [WS_METHODS.serverSetAcpRegistryProvider]: "server",
   [WS_METHODS.serverDisableAcpRegistryProvider]: "server",
   [WS_METHODS.serverLogoutAcpRegistry]: "server",
@@ -207,6 +212,7 @@ const DEFAULT_RPC_SPAN_ATTRIBUTES = {
   "rpc.system": "effect-rpc",
 } as const;
 const RPC_METHODS_WITH_TRACING_DISABLED: ReadonlySet<string> = new Set([
+  WS_METHODS.serverSetPiConnectionApiKey,
   WS_METHODS.serverGetTraceDiagnostics,
   WS_METHODS.serverGetProcessDiagnostics,
   WS_METHODS.serverGetProcessResourceHistory,

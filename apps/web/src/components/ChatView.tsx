@@ -1,4 +1,5 @@
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
+import { useLocalDispatchState } from "./chat/useLocalDispatchState";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
@@ -57,7 +58,6 @@ import {
   type AssistantCitation,
   type ChatFileAttachment,
   CommandId,
-  DEFAULT_MODEL,
   isProviderNativeSubagentThread,
   type ChatAttachment as ContractChatAttachment,
   EnvironmentAuthorizationError,
@@ -232,7 +232,6 @@ import {
   type ChatMessage,
   isBrowserPreviewAttachment,
   isImageAttachment,
-  type SessionPhase,
   type Thread,
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
@@ -344,6 +343,7 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useRemoveClonedProject } from "../hooks/useRemoveClonedProject";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
+import { carryRuntimePolicyForModelChange } from "./chat/runtimePolicySelection";
 import {
   getComposerPromptInjectionState,
   getComposerProviderState,
@@ -504,7 +504,11 @@ import {
   MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME,
   runMobileComposerTransition,
 } from "./chat/draftHeroTransition";
-import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
+import {
+  acquireComposerSend,
+  acknowledgeComposerSend,
+  type ComposerDispatchMode,
+} from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   agentControlledBrowserCloseConfirmation,
@@ -512,13 +516,11 @@ import {
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   collectUserMessageBlobPreviewUrls,
-  createLocalDispatchSnapshot,
   deriveCommittedServerUserMessageIds,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
   hasEnvironmentReconnectWarningGraceElapsed,
   scheduleEnvironmentReconnectWarning,
-  hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   shouldShowBranchMismatchBanner,
   shouldShowPlanFollowUpPrompt,
@@ -530,7 +532,6 @@ import {
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
-  type LocalDispatchSnapshot,
   PullRequestDialogState,
   cloneComposerImageForRetry,
   deriveLockedProvider,
@@ -849,76 +850,6 @@ interface TerminalLaunchContext {
 }
 
 type PersistentTerminalLaunchContext = Pick<TerminalLaunchContext, "cwd" | "worktreePath">;
-
-function useLocalDispatchState(input: {
-  activeThread: Thread | undefined;
-  activeLatestRun: Thread["latestRun"] | null;
-  latestUserMessageId: MessageId | null;
-  phase: SessionPhase;
-  activePendingApproval: RuntimeRequestId | null;
-  activePendingUserInput: RuntimeRequestId | null;
-  threadError: string | null | undefined;
-}) {
-  const [localDispatch, setLocalDispatch] = useState<LocalDispatchSnapshot | null>(null);
-
-  const resetLocalDispatch = useCallback(() => {
-    setLocalDispatch(null);
-  }, []);
-
-  const serverAcknowledgedLocalDispatch = useMemo(
-    () =>
-      hasServerAcknowledgedLocalDispatch({
-        localDispatch,
-        phase: input.phase,
-        latestRun: input.activeLatestRun,
-        latestUserMessageId: input.latestUserMessageId,
-        runtime: input.activeThread?.runtime ?? null,
-        hasPendingApproval: input.activePendingApproval !== null,
-        hasPendingUserInput: input.activePendingUserInput !== null,
-        threadError: input.threadError,
-      }),
-    [
-      input.activeLatestRun,
-      input.latestUserMessageId,
-      input.activePendingApproval,
-      input.activePendingUserInput,
-      input.activeThread?.runtime,
-      input.phase,
-      input.threadError,
-      localDispatch,
-    ],
-  );
-  const activeLocalDispatch = serverAcknowledgedLocalDispatch ? null : localDispatch;
-  const beginLocalDispatch = useCallback(
-    (options?: { preparingWorktree?: boolean; submissionIntent?: ComposerSubmissionIntent }) => {
-      const preparingWorktree = Boolean(options?.preparingWorktree);
-      setLocalDispatch((current) => {
-        const active = serverAcknowledgedLocalDispatch ? null : current;
-        if (active) {
-          const submissionIntent = options?.submissionIntent ?? active.submissionIntent;
-          return active.preparingWorktree === preparingWorktree &&
-            active.submissionIntent === submissionIntent
-            ? active
-            : { ...active, preparingWorktree, submissionIntent };
-        }
-        return createLocalDispatchSnapshot(input.activeThread, {
-          ...options,
-          latestUserMessageId: input.latestUserMessageId,
-        });
-      });
-    },
-    [input.activeThread, input.latestUserMessageId, serverAcknowledgedLocalDispatch],
-  );
-
-  return {
-    beginLocalDispatch,
-    resetLocalDispatch,
-    localDispatchStartedAt: activeLocalDispatch?.startedAt ?? null,
-    isPreparingWorktree: activeLocalDispatch?.preparingWorktree ?? false,
-    isSendBusy: activeLocalDispatch !== null,
-    backgroundSubmissionPending: activeLocalDispatch?.submissionIntent === "background",
-  };
-}
 
 /** Same terminal ids (order ignored) — avoids reconcile when only server session ordering differs. */
 function terminalIdListsEqual(left: readonly string[], right: readonly string[]): boolean {
@@ -1822,7 +1753,6 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
   const setComposerDraftThreadContexts = useComposerDraftStore((store) => store.setThreadContexts);
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
-  const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
   );
@@ -1991,6 +1921,9 @@ export default function ChatView(props: ChatViewProps) {
   const fanoutStateAtom = draftFanoutStateAtom(routeThreadKey);
   const fanoutState = useAtomValue(fanoutStateAtom);
   const sendInFlightRef = fanoutState.sendInFlight;
+  useEffect(() => {
+    acknowledgeComposerSend(sendInFlightRef, serverAcknowledgedUserMessageIds);
+  }, [sendInFlightRef, serverAcknowledgedUserMessageIds]);
   const [resumingThreadKeys, setResumingThreadKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -4584,7 +4517,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     const result = await interruptThreadTurn({
       environmentId,
-      input: { threadId: activeThread.id },
+      input: {
+        threadId: activeThread.id,
+        ...(activeRuntime?.activeRunId ? { runId: activeRuntime.activeRunId } : {}),
+      },
     });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
@@ -4593,7 +4529,13 @@ export default function ChatView(props: ChatViewProps) {
         error instanceof Error ? error.message : "Failed to interrupt the current turn.",
       );
     }
-  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  }, [
+    activeThread,
+    activeRuntime?.activeRunId,
+    environmentId,
+    interruptThreadTurn,
+    setThreadError,
+  ]);
   useEffect(() => subscribeSnapShotComposerFocus(focusComposer), [focusComposer]);
   const scheduleComposerFocus = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -5353,9 +5295,14 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const handleRuntimeModeChange = useCallback(
-    (mode: RuntimeMode) => {
-      if (mode === runtimeMode) return;
-      setComposerDraftRuntimeMode(composerDraftTarget, mode);
+    (mode: RuntimeMode, modelSelection: ModelSelection) => {
+      if (sendInFlightRef.current || canInterruptRunningThread || isSendBusy || isConnecting)
+        return;
+      setComposerDraftModelSelection(composerDraftTarget, modelSelection, {
+        explicit: true,
+        replaceOptions: true,
+        runtimeMode: mode,
+      });
       if (isLocalDraftThread) {
         setDraftThreadContext(composerDraftTarget, { runtimeMode: mode });
       }
@@ -5363,10 +5310,12 @@ export default function ChatView(props: ChatViewProps) {
     },
     [
       isLocalDraftThread,
-      runtimeMode,
+      canInterruptRunningThread,
+      isSendBusy,
+      isConnecting,
       scheduleComposerFocus,
       composerDraftTarget,
-      setComposerDraftRuntimeMode,
+      setComposerDraftModelSelection,
       setDraftThreadContext,
     ],
   );
@@ -6270,6 +6219,7 @@ export default function ChatView(props: ChatViewProps) {
       createdAt: string;
       branch?: string;
       runtimeMode: RuntimeMode;
+      modelSelection?: ModelSelection;
       interactionMode: ProviderInteractionMode;
     }): Promise<AtomCommandResult<void, unknown>> => {
       if (!serverThread) {
@@ -6279,9 +6229,24 @@ export default function ChatView(props: ChatViewProps) {
       let result: AtomCommandResult<void, unknown> = AsyncResult.success(undefined);
       const metadataUpdate = resolveThreadMetadataUpdateForNextTurn({
         currentModelSelection: serverThread.modelSelection,
+        ...(input.modelSelection ? { nextModelSelection: input.modelSelection } : {}),
         currentBranch: serverThread.branch,
         ...(input.branch ? { nextBranch: input.branch } : {}),
       });
+      if (input.runtimeMode !== "auto" && input.runtimeMode !== serverThread.runtimeMode) {
+        result = mapAtomCommandResult(
+          await setThreadRuntimeMode({
+            environmentId,
+            input: {
+              threadId: input.threadId,
+              runtimeMode: input.runtimeMode,
+              createdAt: input.createdAt,
+            },
+          }),
+          () => undefined,
+        );
+        if (result._tag === "Failure") return result;
+      }
       if (metadataUpdate) {
         result = mapAtomCommandResult(
           await updateThreadMetadata({
@@ -6298,7 +6263,7 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
 
-      if (input.runtimeMode !== serverThread.runtimeMode) {
+      if (input.runtimeMode === "auto" && input.runtimeMode !== serverThread.runtimeMode) {
         result = mapAtomCommandResult(
           await setThreadRuntimeMode({
             environmentId,
@@ -7427,8 +7392,9 @@ export default function ChatView(props: ChatViewProps) {
       const threadId = activeThread.id;
       const messageId = newMessageId();
       const createdAt = new Date().toISOString();
-      sendInFlightRef.current = true;
-      beginLocalDispatch();
+      const sendReceipt = acquireComposerSend(sendInFlightRef, messageId);
+      if (sendReceipt === null) return;
+      const finishLocalDispatch = beginLocalDispatch();
       setThreadError(threadId, null);
       setOptimisticUserMessages((messages) => [
         ...messages,
@@ -7452,6 +7418,7 @@ export default function ChatView(props: ChatViewProps) {
             : {}),
           runtimeMode,
           interactionMode: context.interactionMode,
+          modelSelection: context.selectedModelSelection,
         });
         const result =
           settingsResult._tag === "Failure"
@@ -7467,11 +7434,10 @@ export default function ChatView(props: ChatViewProps) {
                   createdAt,
                 },
               });
-        if (result._tag === "Failure") {
+        if (result._tag === "Failure" && !sendReceipt.wasAcknowledged()) {
           setOptimisticUserMessages((messages) =>
             messages.filter((message) => message.id !== messageId),
           );
-          resetLocalDispatch();
           if (!isAtomCommandInterrupted(result)) {
             const error = squashAtomCommandFailure(result);
             setThreadError(threadId, error instanceof Error ? error.message : failureMessage);
@@ -7480,7 +7446,8 @@ export default function ChatView(props: ChatViewProps) {
           clearUsageLimitsFor(routeThreadKey);
         }
       } finally {
-        sendInFlightRef.current = false;
+        sendReceipt.release();
+        finishLocalDispatch();
       }
     },
     [
@@ -7491,7 +7458,6 @@ export default function ChatView(props: ChatViewProps) {
       environmentId,
       localCheckoutBranchMismatch,
       persistThreadSettingsForNextTurn,
-      resetLocalDispatch,
       routeThreadKey,
       runtimeMode,
       scrollToEnd,
@@ -8638,6 +8604,8 @@ export default function ChatView(props: ChatViewProps) {
   };
 
   const onResume = async () => {
+    const resumeContext = composerRef.current?.getSendContext();
+    if (resumeContext && !resumeContext.providerAvailable) return;
     if (
       !activeThread ||
       (resumableRunId === null && !hasHeldQueuedRuns) ||
@@ -8669,6 +8637,7 @@ export default function ChatView(props: ChatViewProps) {
             : {}),
           runtimeMode,
           interactionMode,
+          ...(resumeContext ? { modelSelection: resumeContext.selectedModelSelection } : {}),
         });
         if (settingsResult._tag === "Failure") return settingsResult;
         const turnResult = await startThreadTurn({
@@ -8676,6 +8645,7 @@ export default function ChatView(props: ChatViewProps) {
           input: {
             threadId,
             manualContinuationOfRunId: resumableRunId,
+            ...(resumeContext ? { modelSelection: resumeContext.selectedModelSelection } : {}),
             message: {
               messageId: newMessageId(),
               role: "user",
@@ -9330,11 +9300,12 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
 
-    sendInFlightRef.current = true;
+    const sendReceipt = acquireComposerSend(sendInFlightRef, messageIdForSend);
+    if (sendReceipt === null) return;
     const sendGeneration = ++composerSendGenerationRef.current;
     const attachmentCapabilitiesBeforeUpload = readLiveAttachmentCapabilities();
     if (attachmentCapabilitiesBeforeUpload.fileBlockReason !== null) {
-      sendInFlightRef.current = false;
+      sendReceipt.release();
       setThreadError(threadIdForSend, attachmentCapabilitiesBeforeUpload.fileBlockReason);
       return;
     }
@@ -9353,12 +9324,12 @@ export default function ChatView(props: ChatViewProps) {
       await awaitAttachmentUploads(composerAttachmentsSnapshot.map((attachment) => attachment.id));
       const attachmentCapabilitiesAfterUpload = readLiveAttachmentCapabilities();
       if (attachmentCapabilitiesAfterUpload.fileBlockReason !== null) {
-        sendInFlightRef.current = false;
+        sendReceipt.release();
         setThreadError(threadIdForSend, attachmentCapabilitiesAfterUpload.fileBlockReason);
         return;
       }
       if (getUploadedAttachments({ environmentId, images: composerAttachmentsSnapshot }) === null) {
-        sendInFlightRef.current = false;
+        sendReceipt.release();
         setThreadError(threadIdForSend, "Retry or remove failed uploads before sending.");
         return;
       }
@@ -9395,7 +9366,7 @@ export default function ChatView(props: ChatViewProps) {
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
       attachmentCapabilitiesBeforeDispatch.fileBlockReason !== null
     ) {
-      sendInFlightRef.current = false;
+      sendReceipt.release();
       setThreadError(
         threadIdForSend,
         attachmentCapabilitiesBeforeDispatch.fileBlockReason ??
@@ -9406,7 +9377,7 @@ export default function ChatView(props: ChatViewProps) {
       );
       return;
     }
-    beginLocalDispatch({
+    const finishLocalDispatch = beginLocalDispatch({
       preparingWorktree: multipleModelSelections !== null || Boolean(baseBranchForWorktree),
       // Only a draft has a background submission to hide behind its hero.
       submissionIntent:
@@ -9611,7 +9582,7 @@ export default function ChatView(props: ChatViewProps) {
         );
         // Each request now owns its background thread. The original draft is
         // ready for another prompt while checkout and setup scripts finish.
-        sendInFlightRef.current = false;
+        sendReceipt.release();
         resetLocalDispatch();
         releasedComposer = true;
         await starts;
@@ -9700,7 +9671,7 @@ export default function ChatView(props: ChatViewProps) {
           }
         }
         if (!releasedComposer) {
-          sendInFlightRef.current = false;
+          sendReceipt.release();
           resetLocalDispatch();
         }
       }
@@ -9807,7 +9778,7 @@ export default function ChatView(props: ChatViewProps) {
     const title = truncate(titleSeed);
     const threadCreateModelSelection = createModelSelection(
       ctxSelectedModelSelection.instanceId,
-      ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
+      ctxSelectedModel || ctxSelectedModelSelection.model,
       ctxSelectedModelSelection.options,
     );
 
@@ -9822,6 +9793,7 @@ export default function ChatView(props: ChatViewProps) {
           : {}),
         runtimeMode,
         interactionMode: sendInteractionMode,
+        modelSelection: ctxSelectedModelSelection,
       });
       if (settingsResult._tag === "Failure") {
         failure = settingsResult;
@@ -9963,10 +9935,11 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
       const startResult = await startPromise;
-      if (startResult._tag === "Failure") {
+      if (startResult._tag === "Failure" && !sendReceipt.wasAcknowledged()) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        finishLocalDispatch();
         setKeepFullHistory(routeThreadKey, false);
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
@@ -10086,13 +10059,13 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
     }
-    sendInFlightRef.current = false;
+    sendReceipt.release();
     if (!turnStartSucceeded) {
       setDockedDraftHeroThreadKey((currentThreadKey) =>
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
-      resetLocalDispatch();
     }
+    finishLocalDispatch();
   };
 
   const onRespondToApproval = useCallback(
@@ -10441,6 +10414,7 @@ export default function ChatView(props: ChatViewProps) {
       ...(localCheckoutBranchMismatch ? { branch: localCheckoutBranchMismatch.currentBranch } : {}),
       runtimeMode,
       interactionMode: nextInteractionMode,
+      modelSelection: ctxSelectedModelSelection,
     });
     let failure: AtomCommandResult<unknown, unknown> | null =
       settingsResult._tag === "Failure" ? settingsResult : null;
@@ -10729,10 +10703,22 @@ export default function ChatView(props: ChatViewProps) {
         useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[
           resolvedModel
         ];
-      const nextModelSelection: ModelSelection =
+      const rememberedModelSelection: ModelSelection =
         rememberedOptions !== undefined && rememberedOptions.length > 0
           ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
           : { instanceId, model: resolvedModel };
+      const currentModelSelection =
+        composerRef.current?.getSendContext().selectedModelSelection ??
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+          ?.modelSelectionByProvider[
+          activeProviderInstanceId ?? activeThread.modelSelection.instanceId
+        ] ??
+        activeThread.modelSelection;
+      const nextModelSelection = carryRuntimePolicyForModelChange(
+        currentModelSelection,
+        rememberedModelSelection,
+        entry,
+      );
       const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
         providers: providerStatuses,
         hasStartedSession: activeRuntime !== null,
@@ -10762,6 +10748,8 @@ export default function ChatView(props: ChatViewProps) {
     },
     [
       activeThread,
+      composerDraftTarget,
+      activeProviderInstanceId,
       activeRuntime,
       lockedProvider,
       supportsProviderSwitchingViaHandoff,

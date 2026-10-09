@@ -1,6 +1,5 @@
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
-  DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   type ModelSelection,
@@ -28,13 +27,15 @@ import { ModelEsque } from "./components/chat/providerIconUtils";
 import {
   type ProviderInstanceEntry,
   deriveProviderInstanceEntries,
+  getNativePiDefaultModel,
+  isLegacyPiDefaultModel,
   NO_PROVIDER_MODEL_SELECTION,
 } from "./providerInstances";
 import { sortModelsForProviderInstance } from "./modelOrdering";
 
 const MAX_CUSTOM_MODEL_COUNT = 32;
 export const MAX_CUSTOM_MODEL_LENGTH = 256;
-const DEFAULT_TEXT_GENERATION_INSTANCE_ID = ProviderInstanceId.make("codex");
+const DEFAULT_TEXT_GENERATION_INSTANCE_ID = ProviderInstanceId.make("pi");
 
 /**
  * Resolve the custom-model list for a given instance, preferring the
@@ -144,10 +145,14 @@ function applyInstanceModelPreferences(
     readonly hiddenModels: ReadonlyArray<string>;
     readonly modelOrder: ReadonlyArray<string>;
   },
+  visibility: { readonly hideCustomModels?: boolean } = {},
 ): AppModelOption[] {
   const hiddenModels = new Set(preferences.hiddenModels);
   return sortModelsForProviderInstance(
-    options.filter((option) => option.isCustom || !hiddenModels.has(option.slug)),
+    options.filter(
+      (option) =>
+        (option.isCustom && !visibility.hideCustomModels) || !hiddenModels.has(option.slug),
+    ),
     { modelOrder: preferences.modelOrder },
   );
 }
@@ -184,6 +189,12 @@ function getAppModelOptions(
   provider: ProviderDriverKind,
   selectedModel?: string | null,
 ): AppModelOption[] {
+  if (provider === "pi") {
+    const entry = deriveProviderInstanceEntries(providers).find(
+      (candidate) => candidate.instanceId === defaultInstanceIdForDriver(provider),
+    );
+    return entry ? getAppModelOptionsForInstance(settings, entry, selectedModel) : [];
+  }
   const rawModels = getProviderModels(providers, provider);
   // Server-reported custom rows mirror settings and can lag a removal, so
   // only built-ins are taken from the snapshot; custom rows are rebuilt from
@@ -241,6 +252,13 @@ export function getAppModelOptionsForInstance(
   entry: ProviderInstanceEntry,
   selectedModel?: string | null,
 ): AppModelOption[] {
+  if (entry.driverKind === "pi") {
+    return applyInstanceModelPreferences(
+      entry.models.filter((model) => !isLegacyPiDefaultModel(model.slug)).map(toAppModelOption),
+      readInstanceModelPreferences(settings, entry.instanceId),
+      { hideCustomModels: true },
+    );
+  }
   const options: AppModelOption[] = entry.models
     .filter((model) => !model.isCustom)
     .map(toAppModelOption);
@@ -279,6 +297,15 @@ export function resolveAppModelSelection(
 ): string {
   const resolvedProvider = resolveSelectableProvider(providers, provider);
   const options = getAppModelOptions(settings, providers, resolvedProvider, selectedModel);
+  if (resolvedProvider === "pi") {
+    return (
+      (!isLegacyPiDefaultModel(selectedModel)
+        ? resolveSelectableModel(resolvedProvider, selectedModel, options)
+        : null) ??
+      getNativePiDefaultModel(options) ??
+      ""
+    );
+  }
   return (
     resolveSelectableModel(resolvedProvider, selectedModel, options) ??
     getDefaultServerModel(providers, resolvedProvider)
@@ -302,6 +329,25 @@ export function resolveAppModelSelectionForInstance(
     resolutionOptions?.preserveUnavailableSelection ? selectedModel : null,
   );
   const resolvedSelection = resolveSelectableModel(entry.driverKind, selectedModel, options);
+  if (entry.driverKind === "pi") {
+    const unavailableSelection = normalizeCustomModelSlug(selectedModel);
+    if (
+      resolutionOptions?.preserveUnavailableSelection &&
+      unavailableSelection &&
+      !isLegacyPiDefaultModel(unavailableSelection) &&
+      !readInstanceModelPreferences(settings, entry.instanceId).hiddenModels.includes(
+        unavailableSelection,
+      ) &&
+      resolveSelectableModel(entry.driverKind, unavailableSelection, entry.models) === null
+    ) {
+      return unavailableSelection;
+    }
+    return (
+      (!isLegacyPiDefaultModel(selectedModel) ? resolvedSelection : null) ??
+      getNativePiDefaultModel(options) ??
+      null
+    );
+  }
   if (resolvedSelection) {
     return resolvedSelection;
   }
@@ -364,10 +410,10 @@ export function resolveAppModelSelectionState(
 ): ModelSelection {
   const selection = settings.textGenerationModelSelection ?? {
     instanceId: DEFAULT_TEXT_GENERATION_INSTANCE_ID,
-    model: DEFAULT_TEXT_GENERATION_MODEL,
+    model: "",
   };
   const supportedProviders = providers.filter(
-    (provider) => provider.supportsTextGeneration !== false,
+    (provider) => provider.driver === "pi" && provider.supportsTextGeneration !== false,
   );
   const entries = deriveProviderInstanceEntries(supportedProviders);
   const selectedEntry = entries.find(
@@ -386,8 +432,9 @@ export function resolveAppModelSelectionState(
         supportedProviders,
         selectedModel,
       ) ??
-      entry.models[0]?.slug ??
-      DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[entry.driverKind];
+      (entry.driverKind === "pi"
+        ? undefined
+        : (entry.models[0]?.slug ?? DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[entry.driverKind]));
     if (!model) {
       return createModelSelection(entry.instanceId, "", []);
     }

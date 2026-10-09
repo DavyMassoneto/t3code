@@ -341,6 +341,7 @@ export const make = Effect.fn("ProviderAuthFlow.make")(function* (options: {
                   Effect.gen(function* () {
                     if (active !== flow) return;
                     if (options.refreshMethodsAfterAuth) yield* refreshMethods;
+                    operation = "idle";
                     yield* publish(flow, {
                       phase: Exit.isSuccess(result) ? "succeeded" : "failed",
                       interaction: null,
@@ -351,7 +352,6 @@ export const make = Effect.fn("ProviderAuthFlow.make")(function* (options: {
                         : failureMessage(result.cause),
                     });
                     active = undefined;
-                    operation = "idle";
                   }),
                 );
               }),

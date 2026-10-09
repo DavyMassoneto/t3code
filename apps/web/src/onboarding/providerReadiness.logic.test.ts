@@ -146,6 +146,46 @@ describe("selectOnboardingProvidersByDriver", () => {
 });
 
 describe("resolveOnboardingProviderLoginCommand", () => {
+  it("launches Pi directly for interactive sign-in", () => {
+    const provider: ServerProvider = {
+      ...readyCodex,
+      driver: ProviderDriverKind.make("pi"),
+      instanceId: ProviderInstanceId.make("pi"),
+    };
+
+    expect(resolveOnboardingProviderLoginCommand(provider, DEFAULT_SERVER_SETTINGS, "linux")).toBe(
+      "pi",
+    );
+  });
+
+  it.each([
+    [
+      "windows",
+      "C:\\Program Files\\Pi & Tools\\pi.exe",
+      "& 'C:\\Program Files\\Pi & Tools\\pi.exe'",
+    ],
+    ["linux", "/opt/Pi Tools/pi", "'/opt/Pi Tools/pi'"],
+  ] as const)("uses the selected Pi instance binary on %s", (platform, binaryPath, command) => {
+    const provider: ServerProvider = {
+      ...readyCodex,
+      driver: ProviderDriverKind.make("pi"),
+      instanceId: ProviderInstanceId.make("pi_work"),
+    };
+
+    expect(
+      resolveOnboardingProviderLoginCommand(
+        provider,
+        {
+          ...DEFAULT_SERVER_SETTINGS,
+          providerInstances: {
+            [provider.instanceId]: { driver: provider.driver, config: { binaryPath } },
+          },
+        },
+        platform,
+      ),
+    ).toBe(command);
+  });
+
   it("uses the selected Codex account binary", () => {
     const provider = { ...readyCodex, instanceId: ProviderInstanceId.make("codex_work") };
 
@@ -318,6 +358,15 @@ describe("resolveOnboardingProviderLoginCommand", () => {
 });
 
 describe("resolveOnboardingProviderInstallCommand", () => {
+  it.each(["windows", "darwin", "linux", "unknown"] as const)(
+    "installs Pi with npm on %s",
+    (platform) => {
+      expect(resolveOnboardingProviderInstallCommand("pi", platform)).toBe(
+        "npm install -g @earendil-works/pi-coding-agent",
+      );
+    },
+  );
+
   it("uses the PowerShell installer on Windows environments", () => {
     expect(resolveOnboardingProviderInstallCommand("codex", "windows")).toBe(
       "irm https://chatgpt.com/codex/install.ps1 | iex",

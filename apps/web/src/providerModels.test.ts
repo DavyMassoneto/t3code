@@ -20,17 +20,41 @@ function model(input: {
   capabilities: ModelCapabilities;
   aliases?: ReadonlyArray<string>;
   isCustom?: boolean;
+  isDefault?: boolean;
 }): ServerProviderModel {
   return {
     slug: input.slug,
     name: input.slug,
     ...(input.aliases ? { aliases: [...input.aliases] } : {}),
     isCustom: input.isCustom ?? false,
+    ...(input.isDefault ? { isDefault: true } : {}),
     capabilities: input.capabilities,
   };
 }
 
 describe("getProviderModelCapabilities", () => {
+  it.each(["default", "pi-default"])(
+    "uses native default capabilities for legacy Pi selection %s",
+    (marker) => {
+      const nativeCapabilities = capabilities("native-thinking");
+      const models = [
+        model({ slug: "default", isDefault: true, capabilities: capabilities("ghost") }),
+        model({ slug: "openai/first", capabilities: capabilities("first") }),
+        model({
+          slug: "plugin/native",
+          isDefault: true,
+          isCustom: true,
+          capabilities: nativeCapabilities,
+        }),
+      ];
+      expect(getProviderModelCapabilities(models, marker, ProviderDriverKind.make("pi"))).toEqual(
+        nativeCapabilities,
+      );
+      expect(
+        getProviderModelCapabilities(models.slice(0, 2), marker, ProviderDriverKind.make("pi")),
+      ).not.toEqual(models[0]!.capabilities);
+    },
+  );
   it("resolves model-declared aliases", () => {
     const aliasCapabilities = capabilities("aliased-option");
     const models = [

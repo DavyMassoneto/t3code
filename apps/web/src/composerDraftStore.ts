@@ -603,6 +603,7 @@ interface ComposerDraftStoreState {
        * thread) rather than a model-only change.
        */
       replaceOptions?: boolean;
+      runtimeMode?: RuntimeMode;
     },
   ) => void;
   /** Replace the model options for one or more providers in the draft. */
@@ -1277,11 +1278,14 @@ export function deriveEffectiveComposerModelState(input: {
           input.settings,
           input.providers,
           baseModelCandidate,
-          { preserveUnavailableSelection: preserveThreadModel },
+          { preserveUnavailableSelection: preserveThreadModel || input.selectedProvider === "pi" },
         )
       : null) ??
-    // Antigravity has no static model or cross-account catalog fallback.
-    (input.selectedProvider === "antigravity" && input.selectedInstanceId ? "" : null) ??
+    // Pi and Antigravity have no static model or cross-account catalog fallback.
+    ((input.selectedProvider === "antigravity" || input.selectedProvider === "pi") &&
+    input.selectedInstanceId
+      ? ""
+      : null) ??
     resolveAppModelSelection(
       input.selectedProvider,
       input.settings,
@@ -1315,7 +1319,7 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
         { preserveUnavailableSelection: true },
       ) ??
-      (input.selectedProvider === "antigravity" ? "" : null) ??
+      (input.selectedProvider === "antigravity" || input.selectedProvider === "pi" ? "" : null) ??
       resolveAppModelSelection(
         input.selectedProvider,
         input.settings,
@@ -3164,6 +3168,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
               base.activeProvider === nextActiveProvider &&
+              (opts?.runtimeMode === undefined || base.runtimeMode === opts.runtimeMode) &&
               (base.modelSelectionExplicit ?? false) === (opts?.explicit === true)
             ) {
               return state;
@@ -3174,6 +3179,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const { modelSelectionExplicit: _previousExplicit, ...restBase } = base;
             const nextDraft: ComposerThreadDraftState = {
               ...restBase,
+              ...(opts?.runtimeMode !== undefined ? { runtimeMode: opts.runtimeMode } : {}),
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
               ...(opts?.explicit === true ? { modelSelectionExplicit: true as const } : {}),

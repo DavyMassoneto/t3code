@@ -14,6 +14,7 @@ import {
   getCustomModelOptionsByInstance,
   getAppModelOptionsForInstance,
   resolveAppModelSelectionForInstance,
+  resolveAppModelSelection,
   resolveAppModelSelectionState,
 } from "./modelSelection";
 
@@ -21,6 +22,7 @@ function provider(input: {
   provider?: ProviderDriverKind;
   instanceId: string;
   models?: ReadonlyArray<string>;
+  defaultModel?: string;
   supportsTextGeneration?: boolean;
 }): ServerProvider {
   const driver =
@@ -44,6 +46,7 @@ function provider(input: {
       slug,
       name: slug,
       isCustom: false,
+      ...(slug === input.defaultModel ? { isDefault: true } : {}),
       capabilities: {},
     })),
     slashCommands: [],
@@ -67,7 +70,255 @@ function settingsWithProviderInstances(): UnifiedSettings {
   };
 }
 
+describe("native Pi default truth", () => {
+  const instanceId = ProviderInstanceId.make("pi");
+  const snapshot: ServerProvider = {
+    ...provider({ provider: ProviderDriverKind.make("pi"), instanceId }),
+    models: [
+      { slug: "default", name: "Default", isDefault: true, isCustom: false, capabilities: {} },
+      { slug: "pi-default", name: "Pi default", isCustom: false, capabilities: {} },
+      { slug: "openai/first", name: "First", isCustom: false, capabilities: {} },
+      {
+        slug: "plugin/native",
+        name: "Native configured",
+        isDefault: true,
+        isCustom: true,
+        capabilities: {},
+      },
+    ],
+  };
+  const settings = { ...DEFAULT_UNIFIED_SETTINGS };
+
+  it.each([null, "default", "pi-default"])(
+    "resolves %s using native metadata, not ordering",
+    (marker) => {
+      expect(resolveAppModelSelectionForInstance(instanceId, settings, [snapshot], marker)).toBe(
+        "plugin/native",
+      );
+      expect(
+        resolveAppModelSelection(ProviderDriverKind.make("pi"), settings, [snapshot], marker),
+      ).toBe("plugin/native");
+    },
+  );
+
+  it("excludes legacy markers from selectable models and retains native plugin defaults", () => {
+    const entry = deriveProviderInstanceEntries([snapshot])[0]!;
+    expect(getAppModelOptionsForInstance(settings, entry).map((option) => option.slug)).toEqual([
+      "openai/first",
+      "plugin/native",
+    ]);
+  });
+
+  it("has no model when the configured default is absent or hidden", () => {
+    const missing = { ...snapshot, models: snapshot.models.filter((model) => !model.isDefault) };
+    expect(
+      resolveAppModelSelectionForInstance(instanceId, settings, [missing], "default"),
+    ).toBeNull();
+    const hidden = {
+      ...settings,
+      providerModelPreferences: {
+        [instanceId]: { hiddenModels: ["plugin/native"], modelOrder: [] },
+      },
+    };
+    expect(
+      resolveAppModelSelectionForInstance(instanceId, hidden, [snapshot], "pi-default"),
+    ).toBeNull();
+    expect(resolveAppModelSelectionState(hidden, [snapshot]).model).toBe("");
+  });
+
+  it.each(["default", "pi-default"])(
+    "resolves legacy project/new-thread defaults in composer state for %s",
+    (marker) => {
+      const state = deriveEffectiveComposerModelState({
+        draft: undefined,
+        providers: [snapshot],
+        selectedProvider: snapshot.driver,
+        selectedInstanceId: instanceId,
+        threadModelSelection: null,
+        projectModelSelection: createModelSelection(instanceId, marker),
+        settings,
+      });
+      expect(state.selectedModel).toBe("plugin/native");
+    },
+  );
+
+  it("does not borrow the global instance catalog when a custom instance default is unavailable", () => {
+    const custom = provider({
+      provider: snapshot.driver,
+      instanceId: "pi_work",
+      models: ["anthropic/first"],
+    });
+    const state = deriveEffectiveComposerModelState({
+      draft: undefined,
+      providers: [snapshot, custom],
+      selectedProvider: custom.driver,
+      selectedInstanceId: custom.instanceId,
+      threadModelSelection: null,
+      projectModelSelection: createModelSelection(custom.instanceId, "default"),
+      settings,
+    });
+    expect(state.selectedModel).toBe("");
+  });
+
+  it.each(["thread", "project"])(
+    "retains an unavailable %s model identity without adding a selectable phantom row",
+    (source) => {
+      const selection = createModelSelection(instanceId, "plugin/removed");
+      const state = deriveEffectiveComposerModelState({
+        draft: undefined,
+        providers: [snapshot],
+        selectedProvider: snapshot.driver,
+        selectedInstanceId: instanceId,
+        threadModelSelection: source === "thread" ? selection : null,
+        projectModelSelection: source === "project" ? selection : null,
+        settings,
+      });
+      expect(state.selectedModel).toBe(selection.model);
+      expect(
+        getAppModelOptionsForInstance(
+          settings,
+          deriveProviderInstanceEntries([snapshot])[0]!,
+          selection.model,
+        ).some((model) => model.slug === selection.model),
+      ).toBe(false);
+    },
+  );
+});
+
 describe("instance-scoped model selection", () => {
+  it("hides native Pi custom models in the actual picker and resolves away from a hidden selection", () => {
+    const instanceId = ProviderInstanceId.make("pi_work");
+    const base = provider({
+      provider: ProviderDriverKind.make("pi"),
+      instanceId,
+      models: ["anthropic/native", "openai/native"],
+    });
+    const snapshot: ServerProvider = {
+      ...base,
+      models: [
+        ...base.models,
+        { slug: "anthropic/custom", name: "Native custom", isCustom: true, capabilities: null },
+        {
+          slug: "venice/custom",
+          name: "Venice custom",
+          isCustom: true,
+          isDefault: true,
+          capabilities: null,
+        },
+      ],
+    };
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerModelPreferences: {
+        [instanceId]: {
+          hiddenModels: ["anthropic/native", "anthropic/custom"],
+          modelOrder: ["anthropic/custom", "venice/custom", "openai/native"],
+        },
+      },
+      favorites: [{ provider: instanceId, model: "anthropic/custom" }],
+    };
+    const entry = deriveProviderInstanceEntries([snapshot])[0]!;
+    expect(getAppModelOptionsForInstance(settings, entry).map((option) => option.slug)).toEqual([
+      "venice/custom",
+      "openai/native",
+    ]);
+    expect(
+      getCustomModelOptionsByInstance(settings, [snapshot], instanceId, "anthropic/custom")
+        .get(instanceId)
+        ?.map((option) => option.slug),
+    ).toEqual(["venice/custom", "openai/native"]);
+    expect(
+      resolveAppModelSelectionForInstance(instanceId, settings, [snapshot], "anthropic/custom", {
+        preserveUnavailableSelection: true,
+      }),
+    ).toBe("venice/custom");
+  });
+
+  it("returns no selection when every Pi catalog model including custom models is hidden", () => {
+    const instanceId = ProviderInstanceId.make("pi");
+    const base = provider({ provider: ProviderDriverKind.make("pi"), instanceId });
+    const snapshot: ServerProvider = {
+      ...base,
+      models: [
+        {
+          slug: "private/custom",
+          name: "Private custom",
+          isCustom: true,
+          isDefault: true,
+          capabilities: null,
+        },
+      ],
+    };
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerModelPreferences: {
+        [instanceId]: { hiddenModels: ["private/custom"], modelOrder: [] },
+      },
+    };
+    expect(
+      getAppModelOptionsForInstance(settings, deriveProviderInstanceEntries([snapshot])[0]!),
+    ).toEqual([]);
+    expect(
+      resolveAppModelSelectionForInstance(instanceId, settings, [snapshot], "private/custom"),
+    ).toBeNull();
+    expect(resolveAppModelSelectionState(settings, [snapshot]).model).toBe("");
+    expect(
+      resolveAppModelSelection(
+        ProviderDriverKind.make("pi"),
+        settings,
+        [snapshot],
+        "private/custom",
+      ),
+    ).toBe("");
+  });
+
+  it("preserves the legacy always-visible custom model behavior for non-Pi instances", () => {
+    const instanceId = ProviderInstanceId.make("claude_openrouter");
+    const snapshot = provider({ instanceId, models: ["claude-sonnet-4-6"] });
+    const settings: UnifiedSettings = {
+      ...settingsWithProviderInstances(),
+      providerModelPreferences: {
+        [instanceId]: { hiddenModels: ["openai/gpt-5.5"], modelOrder: ["openai/gpt-5.5"] },
+      },
+    };
+    expect(
+      getAppModelOptionsForInstance(settings, deriveProviderInstanceEntries([snapshot])[0]!).map(
+        (option) => option.slug,
+      ),
+    ).toEqual(["openai/gpt-5.5", "claude-sonnet-4-6"]);
+  });
+
+  it("uses the Pi catalog rather than injected client custom models", () => {
+    const instanceId = ProviderInstanceId.make("pi_work");
+    const snapshot = provider({
+      provider: ProviderDriverKind.make("pi"),
+      instanceId,
+      models: ["anthropic/from-pi"],
+      defaultModel: "anthropic/from-pi",
+    });
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [instanceId]: {
+          driver: snapshot.driver,
+          config: { customModels: ["invented/client-model"] },
+        },
+      },
+    };
+    const entry = deriveProviderInstanceEntries([snapshot])[0]!;
+    expect(getAppModelOptionsForInstance(settings, entry).map((option) => option.slug)).toEqual([
+      "anthropic/from-pi",
+    ]);
+    expect(
+      resolveAppModelSelectionForInstance(
+        instanceId,
+        settings,
+        [snapshot],
+        "invented/client-model",
+      ),
+    ).toBe("anthropic/from-pi");
+  });
+
   it("preserves server-provided legacy model metadata", () => {
     const baseProvider = provider({
       instanceId: "claudeAgent",
@@ -791,25 +1042,27 @@ describe("instance-scoped model selection", () => {
   it("preserves custom provider instances in settings model selection", () => {
     const providers = [
       provider({
-        instanceId: "claudeAgent",
+        provider: ProviderDriverKind.make("pi"),
+        instanceId: "pi",
         models: ["claude-sonnet-4-6"],
       }),
       provider({
-        instanceId: "claude_openrouter",
+        provider: ProviderDriverKind.make("pi"),
+        instanceId: "pi_work",
         models: ["claude-sonnet-4-6"],
       }),
     ];
     const settings: UnifiedSettings = {
       ...settingsWithProviderInstances(),
       textGenerationModelSelection: {
-        instanceId: ProviderInstanceId.make("claude_openrouter"),
-        model: "openai/gpt-5.5",
+        instanceId: ProviderInstanceId.make("pi_work"),
+        model: "claude-sonnet-4-6",
       },
     };
 
     expect(resolveAppModelSelectionState(settings, providers)).toEqual({
-      instanceId: ProviderInstanceId.make("claude_openrouter"),
-      model: "openai/gpt-5.5",
+      instanceId: ProviderInstanceId.make("pi_work"),
+      model: "claude-sonnet-4-6",
     });
   });
 
@@ -822,7 +1075,8 @@ describe("instance-scoped model selection", () => {
         supportsTextGeneration: false,
       }),
       provider({
-        instanceId: "codex",
+        provider: ProviderDriverKind.make("pi"),
+        instanceId: "pi",
         models: ["gpt-5.6-luna"],
       }),
     ];
@@ -835,7 +1089,7 @@ describe("instance-scoped model selection", () => {
     };
 
     expect(resolveAppModelSelectionState(settings, providers).instanceId).toBe(
-      ProviderInstanceId.make("codex"),
+      ProviderInstanceId.make("pi"),
     );
   });
   it("does not select a provider that cannot generate system text", () => {
@@ -848,7 +1102,12 @@ describe("instance-scoped model selection", () => {
       }),
       supportsTextGeneration: false,
     };
-    const supported = provider({ instanceId: "codex", models: ["gpt-5.6-sol"] });
+    const supported = provider({
+      provider: ProviderDriverKind.make("pi"),
+      instanceId: "pi",
+      models: ["gpt-5.6-sol"],
+      defaultModel: "gpt-5.6-sol",
+    });
     const settings = {
       ...settingsWithProviderInstances(),
       textGenerationModelSelection: createModelSelection(instanceId, "gemini-3.1-pro"),
@@ -898,9 +1157,9 @@ describe("resolveAppModelSelectionState with the opencode plan agent", () => {
     ]),
   };
 
-  it("keeps a stored plan agent this device did not pick", () => {
+  it("does not revive a stored OpenCode text-generation selection", () => {
     expect(resolveAppModelSelectionState(settings, [opencode])).toEqual(
-      createModelSelection(instanceId, model, [{ id: "agent", value: "plan" }]),
+      NO_PROVIDER_MODEL_SELECTION,
     );
   });
 });

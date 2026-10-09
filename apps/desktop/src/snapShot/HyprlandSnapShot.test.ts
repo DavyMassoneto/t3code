@@ -93,7 +93,9 @@ it("installs offline at a stable executable path and probes only capabilities", 
 });
 it("updates explicitly and removes only its helper", async () => {
   await setup.perform("install-hyprland-helper");
-  const unrelated = NodePath.join(paths.dataHome, "keep.txt");
+  const unrelated = NodePath.join(paths.dataHome, "t3code/hyprland-capture/t3-hyprland-snap-shot");
+  await NodeFSP.mkdir(NodePath.dirname(unrelated), { recursive: true });
+  expect(hyprlandCaptureExecutable(paths)).not.toBe(unrelated);
   await NodeFSP.writeFile(unrelated, "keep");
   await NodeFSP.writeFile(paths.bundle, "update");
   expect((await setup.state()).status).toBe("update-required");

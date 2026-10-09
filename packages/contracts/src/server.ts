@@ -25,6 +25,7 @@ import {
 import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
+import { ProviderRuntimePolicy } from "./providerRuntime.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
@@ -124,6 +125,7 @@ export type ServerProviderSkill = typeof ServerProviderSkill.Type;
 export const ServerProviderWorkspaceSnapshot = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   checkedAt: IsoDateTime,
+  runtimePolicies: Schema.optional(Schema.Array(ProviderRuntimePolicy)),
   slashCommands: Schema.Array(ServerProviderSlashCommand),
   /** Skills are available, but command discovery still needs a retry. */
   slashCommandsPending: Schema.optional(Schema.Boolean),
@@ -243,6 +245,7 @@ export const ServerProvider = Schema.Struct({
   // meter once its activities load. Clients reserve the meter's space on it.
   reportsContextWindow: Schema.optional(Schema.Boolean),
   supportedRuntimeModes: Schema.optional(ForwardCompatibleArray(RuntimeMode)),
+  runtimePolicies: Schema.optional(Schema.Array(ProviderRuntimePolicy)),
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
   supportsConversationRollback: Schema.optional(Schema.Boolean),
   supportsTextGeneration: Schema.optional(Schema.Boolean),

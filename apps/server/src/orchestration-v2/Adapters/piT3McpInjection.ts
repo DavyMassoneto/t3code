@@ -9,6 +9,7 @@ import {
   T3_MCP_BEARER_ENV,
   T3_MCP_URL_ENV,
   T3_PI_RUNTIME_MODE_ENV,
+  T3_PI_POLICY_TOKEN_ENV,
 } from "./piT3McpExtensionSource.ts";
 
 const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
@@ -256,6 +257,7 @@ export function buildPiRpcLaunch(input: {
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
   readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+  readonly policyToken?: string;
 }): {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
@@ -291,6 +293,8 @@ export function buildPiRpcLaunch(input: {
   // credentials inherited from the server or a parent provider process.
   delete environment[T3_MCP_URL_ENV];
   delete environment[T3_MCP_BEARER_ENV];
+  delete environment[T3_PI_RUNTIME_MODE_ENV];
+  delete environment[T3_PI_POLICY_TOKEN_ENV];
 
   return {
     args,
@@ -298,9 +302,11 @@ export function buildPiRpcLaunch(input: {
       ...environment,
       ...(hasT3Extension && input.runtimeMode !== undefined
         ? {
-            [T3_PI_RUNTIME_MODE_ENV]:
-              input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
+            [T3_PI_RUNTIME_MODE_ENV]: input.runtimeMode,
           }
+        : {}),
+      ...(hasT3Extension && input.policyToken !== undefined
+        ? { [T3_PI_POLICY_TOKEN_ENV]: input.policyToken }
         : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {

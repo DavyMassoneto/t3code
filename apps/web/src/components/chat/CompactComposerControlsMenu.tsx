@@ -1,4 +1,4 @@
-import { ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
+import { ProviderInteractionMode } from "@t3tools/contracts";
 import { memo, type ReactNode } from "react";
 import { EllipsisIcon } from "lucide-react";
 import {
@@ -15,10 +15,13 @@ import { useComposerMenuState } from "./useComposerMenuState";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
-  runtimeMode: RuntimeMode;
+  runtimeMode: string;
+  runtimePolicyDisabled?: boolean;
   runtimeModeOptions: ReadonlyArray<{
-    readonly mode: RuntimeMode;
+    readonly value: string;
     readonly label: string;
+    readonly disabled?: boolean;
+    readonly description?: string;
   }>;
   showInteractionModeToggle: boolean;
   traitsMenuContent?: ReactNode;
@@ -30,14 +33,21 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
    */
   hidden?: boolean;
   onToggleInteractionMode: () => void;
-  onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onRuntimeModeChange: (value: string) => void;
+  onRuntimePolicyOpen?: () => void;
 }) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
   const [open, setOpen] = useComposerMenuState(props.hidden);
 
   return (
-    <Menu open={open} onOpenChange={setOpen}>
+    <Menu
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (nextOpen) props.onRuntimePolicyOpen?.();
+      }}
+    >
       <MenuTrigger
         render={
           <ComposerControl
@@ -80,11 +90,21 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
           value={props.runtimeMode}
           onValueChange={(value) => {
             if (!value || value === props.runtimeMode) return;
-            props.onRuntimeModeChange(value as RuntimeMode);
+            if (props.runtimePolicyDisabled) return;
+            if (
+              !props.runtimeModeOptions.some((option) => option.value === value && !option.disabled)
+            )
+              return;
+            props.onRuntimeModeChange(value);
           }}
         >
           {props.runtimeModeOptions.map((option) => (
-            <MenuRadioItem key={option.mode} value={option.mode}>
+            <MenuRadioItem
+              key={option.value}
+              value={option.value}
+              disabled={props.runtimePolicyDisabled || option.disabled}
+              title={option.description}
+            >
               {option.label}
             </MenuRadioItem>
           ))}

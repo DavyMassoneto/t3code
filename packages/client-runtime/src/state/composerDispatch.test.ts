@@ -1,9 +1,45 @@
 import { describe, expect, it } from "vite-plus/test";
+import { MessageId } from "@t3tools/contracts";
 
 import {
   alternateComposerDispatchAction,
+  acquireComposerSend,
+  acknowledgeComposerSend,
   resolveComposerDispatchMode,
 } from "./composerDispatch.ts";
+
+describe("composer send receipts", () => {
+  it("allows another message after its own durable acknowledgment without the old RPC reply", () => {
+    const inFlight = { current: false };
+    const firstId = MessageId.make("first-message");
+    const nextId = MessageId.make("next-message");
+    const first = acquireComposerSend(inFlight, firstId)!;
+    expect(acquireComposerSend(inFlight, nextId)).toBeNull();
+    expect(
+      acknowledgeComposerSend(inFlight, new Set([MessageId.make("other-client-message")])),
+    ).toBe(false);
+    expect(acquireComposerSend(inFlight, nextId)).toBeNull();
+    expect(acknowledgeComposerSend(inFlight, new Set([firstId]))).toBe(true);
+    const next = acquireComposerSend(inFlight, nextId);
+    expect(next).not.toBeNull();
+    expect(first.wasAcknowledged()).toBe(true);
+    first.release();
+    expect(inFlight.current).toBe(true);
+    next!.release();
+    expect(inFlight.current).toBe(false);
+  });
+
+  it("keeps unacknowledged sends locked and does not release a newer non-message operation", () => {
+    const inFlight = { current: false };
+    const send = acquireComposerSend(inFlight, MessageId.make("message"))!;
+    expect(acknowledgeComposerSend(inFlight, new Set())).toBe(false);
+    expect(send.wasAcknowledged()).toBe(false);
+    send.release();
+    inFlight.current = true;
+    send.release();
+    expect(inFlight.current).toBe(true);
+  });
+});
 
 describe("resolveComposerDispatchMode", () => {
   it("starts an ordinary turn while idle", () => {

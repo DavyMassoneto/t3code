@@ -9,11 +9,12 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import { createModelCapabilities, resolveSelectableModel } from "@t3tools/shared/model";
+import { getNativePiDefaultModel, isLegacyPiDefaultModel } from "./providerInstances";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
 });
-const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("pi");
 
 export function formatProviderDriverKindLabel(provider: ProviderDriverKind): string {
   return provider
@@ -46,10 +47,13 @@ export function resolveSelectableProvider(
   provider: ProviderDriverKind | ProviderInstanceId | null | undefined,
 ): ProviderDriverKind {
   const requestedEntry = providers.find((candidate) => candidate.instanceId === provider);
-  if (requestedEntry?.enabled) {
+  if (requestedEntry?.enabled && requestedEntry.driver === "pi") {
     return requestedEntry.driver;
   }
-  return providers.find((candidate) => candidate.enabled)?.driver ?? DEFAULT_DRIVER_KIND;
+  return (
+    providers.find((candidate) => candidate.enabled && candidate.driver === "pi")?.driver ??
+    DEFAULT_DRIVER_KIND
+  );
 }
 
 export function getProviderModelCapabilities(
@@ -58,7 +62,10 @@ export function getProviderModelCapabilities(
   provider: ProviderDriverKind,
   planModeEnabled = true,
 ): ModelCapabilities {
-  const slug = resolveSelectableModel(provider, model, models);
+  const slug =
+    provider === "pi" && isLegacyPiDefaultModel(model)
+      ? getNativePiDefaultModel(models)
+      : resolveSelectableModel(provider, model, models);
   const selectedModel = models.find((candidate) => candidate.slug === slug);
   const caps = selectedModel?.capabilities ?? EMPTY_CAPABILITIES;
   if (planModeEnabled) {
@@ -97,6 +104,7 @@ export function getDefaultServerModel(
   provider: ProviderDriverKind,
 ): string {
   const models = getProviderModels(providers, provider);
+  if (provider === "pi") return getNativePiDefaultModel(models) ?? "";
   return (
     models.find((model) => model.isDefault && !model.isCustom)?.slug ??
     models.find((model) => !model.isCustom)?.slug ??

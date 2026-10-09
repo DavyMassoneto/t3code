@@ -31,6 +31,55 @@ const baseProviderSnapshot = {
 };
 
 describe("ServerProvider", () => {
+  it("accepts legacy snapshots without runtime policies", () => {
+    const parsed = decodeServerProvider(baseProviderSnapshot);
+
+    expect(parsed.runtimePolicies).toBeUndefined();
+    expect(Schema.encodeSync(ServerProvider)(parsed)).not.toHaveProperty("runtimePolicies");
+  });
+
+  it("round-trips plugin runtime policies without changing supported runtime modes", () => {
+    const runtimePolicies = [
+      {
+        id: "review",
+        label: "Review",
+        description: "Ask before making changes",
+        extensionName: "review-plugin",
+        command: "pi-desktop-policy-review",
+      },
+    ];
+    const parsed = decodeServerProvider({
+      ...baseProviderSnapshot,
+      instanceId: "pi",
+      driver: "pi",
+      supportedRuntimeModes: ["approval-required", "auto-accept-edits", "auto"],
+      runtimePolicies,
+    });
+
+    expect(parsed.runtimePolicies).toEqual(runtimePolicies);
+    expect(parsed.supportedRuntimeModes).toEqual([
+      "approval-required",
+      "auto-accept-edits",
+      "auto",
+    ]);
+    expect(Schema.encodeSync(ServerProvider)(parsed).runtimePolicies).toEqual(runtimePolicies);
+  });
+
+  it("accepts an empty runtime policy catalog", () => {
+    expect(
+      decodeServerProvider({ ...baseProviderSnapshot, runtimePolicies: [] }).runtimePolicies,
+    ).toEqual([]);
+  });
+
+  it("rejects malformed runtime policy catalogs", () => {
+    expect(() =>
+      decodeServerProvider({ ...baseProviderSnapshot, runtimePolicies: [{}] }),
+    ).toThrow();
+    expect(() =>
+      decodeServerProvider({ ...baseProviderSnapshot, runtimePolicies: null }),
+    ).toThrow();
+  });
+
   it.each([undefined, true, false])("decodes workspace command discovery pending=%s", (pending) => {
     const workspace = {
       cwd: "/workspace/project",
@@ -44,6 +93,38 @@ describe("ServerProvider", () => {
       workspaceSnapshots: [workspace],
     });
     expect(parsed.workspaceSnapshots).toEqual([workspace]);
+    expect(parsed.workspaceSnapshots?.[0]?.runtimePolicies).toBeUndefined();
+    expect(Schema.encodeSync(ServerProvider)(parsed).workspaceSnapshots?.[0]).not.toHaveProperty(
+      "runtimePolicies",
+    );
+  });
+
+  it("round-trips workspace runtime policies separately from the provider catalog", () => {
+    const workspace = {
+      cwd: "/workspace/project",
+      checkedAt: baseProviderSnapshot.checkedAt,
+      slashCommands: [],
+      skills: [],
+      runtimePolicies: [
+        {
+          id: "workspace-review",
+          label: "Workspace review",
+          extensionName: "workspace-plugin",
+          command: "pi-desktop-policy-workspace-review",
+        },
+      ],
+    };
+    const parsed = decodeServerProvider({
+      ...baseProviderSnapshot,
+      instanceId: "pi",
+      driver: "pi",
+      runtimePolicies: [],
+      workspaceSnapshots: [workspace],
+    });
+
+    expect(parsed.runtimePolicies).toEqual([]);
+    expect(parsed.workspaceSnapshots).toEqual([workspace]);
+    expect(Schema.encodeSync(ServerProvider)(parsed).workspaceSnapshots).toEqual([workspace]);
   });
 
   it("defaults capability arrays when decoding provider snapshots", () => {

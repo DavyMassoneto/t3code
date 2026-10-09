@@ -15,6 +15,7 @@
  * @module usageScanCache
  */
 import type { UsageProviderKind } from "@t3tools/contracts";
+import type { PiScanState } from "./piUsageTranscripts.ts";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 import type { CodexScanState, UsageRecord, UsageSpeed } from "./usageTranscripts.ts";
@@ -94,6 +95,7 @@ interface SerializedFile {
   readonly gh: number;
   /** Codex reducer state at `o`; `null` for stateless providers. */
   readonly cs: CodexScanState | null;
+  readonly ps?: PiScanState;
 }
 
 interface SerializedCache {
@@ -148,6 +150,7 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     gl: entry.position.guardLength,
     gh: entry.position.guardHash,
     cs: entry.position.codexState,
+    ...(entry.position.piState === undefined ? {} : { ps: entry.position.piState }),
   };
 }
 
@@ -300,7 +303,8 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as Partial<SerializedFile>;
     if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
-    if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "grok") continue;
+    if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "grok" && entry.p !== "pi")
+      continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;
     // Position fields feed byte offsets and a Buffer allocation in the reader,
     // so anything outside their real ranges must reject the entry: a bogus
@@ -326,6 +330,16 @@ export function decodeScanCache(document: unknown): ScanCache {
     const legacyCodex = entry.p === "codex" && version < USAGE_SCAN_CACHE_VERSION;
     const codexState = legacyCodex ? null : decodeCodexState(entry.cs);
     if (codexState === undefined) continue;
+    const piState = entry.ps;
+    if (
+      entry.p === "pi" &&
+      (typeof piState !== "object" ||
+        piState === null ||
+        typeof piState.sessionId !== "string" ||
+        typeof piState.provider !== "string" ||
+        typeof piState.model !== "string")
+    )
+      continue;
 
     const provider: UsageProviderKind = entry.p;
     const records = decodeRecords(entry.r, provider);
@@ -340,7 +354,13 @@ export function decodeScanCache(document: unknown): ScanCache {
       tailRecords,
       position: legacyCodex
         ? { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null }
-        : { resumeOffset: entry.o, guardLength: entry.gl, guardHash: entry.gh, codexState },
+        : {
+            resumeOffset: entry.o,
+            guardLength: entry.gl,
+            guardHash: entry.gh,
+            codexState,
+            ...(entry.p === "pi" ? { piState } : {}),
+          },
     });
   }
 

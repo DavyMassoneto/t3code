@@ -1,0 +1,62 @@
+name: Pi Core
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pi-core:
+    name: Pi (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: true
+
+      - name: Pi protocol and integration tests
+        run: >-
+          vp test run
+          apps/server/src/provider/PiCommands.test.ts
+          apps/server/src/provider/PiProvider.test.ts
+          apps/server/src/provider/piThinkingCapabilities.test.ts
+          apps/server/src/provider/Drivers/PiDriver.test.ts
+          apps/server/src/orchestration-v2/Adapters/PiAdapterV2.test.ts
+          apps/server/src/orchestration-v2/Adapters/piT3McpInjection.test.ts
+          apps/server/src/orchestration-v2/Adapters/piT3McpExtensionSource.test.ts
+          apps/server/src/textGeneration/PiTextGeneration.test.ts
+          apps/server/src/project/AgentSessionScanner.test.ts
+          apps/server/src/project/AgentSessionTranscript.test.ts
+          apps/server/src/project/AgentSessionImporter.test.ts
+          apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts
+          apps/server/src/provider/AcpRegistryCatalog.test.ts
+
+      - name: Install pinned Pi runtime
+        run: npm install --global @earendil-works/pi-coding-agent@1.1.0
+
+      - name: Verify native Pi transport without credentials
+        run: node apps/server/scripts/pi-native-smoke.ts
