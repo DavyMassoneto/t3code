@@ -1,6 +1,6 @@
 # Publishing Pi Desktop
 
-The release owner manages commits, tags, and publication. The dedicated `Pi Desktop Release` workflow builds from a stable `vX.Y.Z` tag on fork `main`; `v0.0.2` must match version `0.0.2` in `apps/desktop/package.json`. Push the tag or manually dispatch the workflow with the existing tag. Do not use the upstream `Release` workflow: its entry job and npm publisher are restricted to `pingdotgg/t3code`.
+The release owner manages commits, tags, and publication. The dedicated `Pi Desktop Release` workflow builds from a stable `X.Y.Z` or `vX.Y.Z` tag on fork `main`; use the bare tag `0.0.2`, matching version `0.0.2` in `apps/desktop/package.json`. The fork inherited upstream `v`-prefixed tags, including `v0.0.2`; preserve them without moving, deleting, or force-updating them. Push the new bare tag or manually dispatch the workflow with the existing bare tag. Do not use the upstream `Release` workflow: its entry job and npm publisher are restricted to `pingdotgg/t3code`.
 
 Standard GitHub Windows x64, macOS arm64/x64, and Linux x64 runners build directly with `scripts/build-desktop-artifact.ts`. Each runner installs Rust and native prerequisites; the script builds the resource monitor and platform helpers itself. There is no dependency on upstream JavaScript or CLI release artifacts, no npm publication, no signing secrets, and no bundled Pi runtime. The Windows build does not embed a WSL runtime; use the native Windows backend for this initial release.
 

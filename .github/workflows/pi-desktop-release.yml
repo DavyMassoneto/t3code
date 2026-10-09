@@ -2,13 +2,13 @@ name: Pi Desktop Release
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["v*.*.*", "[0-9]*.*.*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag on main (for example v0.0.2)"
+        description: "Existing release tag on main (for example 0.0.2)"
         required: true
-        default: v0.0.2
+        default: 0.0.2
         type: string
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          [[ "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
           git rev-parse --verify "refs/tags/$RELEASE_TAG"
           git merge-base --is-ancestor HEAD origin/main
           version="${RELEASE_TAG#v}"
