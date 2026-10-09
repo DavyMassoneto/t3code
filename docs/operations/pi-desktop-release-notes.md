@@ -1,11 +1,18 @@
-# Pi Desktop 0.0.2
+# Pi Desktop 0.0.3
 
-Patch release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`, fixing native Pi SDK discovery in the installed Windows application.
+Release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`, adding an optional bundled native Pi Desktop Auto Mode extension while keeping the Pi runtime external.
 
-## Fix in 0.0.2
+## New in 0.0.3
+
+- Bundled Pi Desktop Auto Mode loads as a native Pi extension but stays inactive until explicitly selected and activated. Activation requires one broad confirmation covering arbitrary shell commands, file reads and writes, and network access without a sandbox. Once active, it adds no per-tool confirmations; third-party extensions' tool hooks and UI requests remain authoritative and are not overridden or auto-answered. Activation is session-local and resets when a session starts.
+- The three basic access modes remain available. Generic Auto is no longer selectable in the access-mode picker or default settings; native Auto Mode is a separate, explicit opt-in policy.
+- Native Pi policy discovery supports both machine-wide and project-local policies.
+- Corrected the macOS canonical-path trust test fixture. This is a test-only fix, not a runtime behavior change.
+
+## Inherited fix from 0.0.2
 
 - Discover the npm-installed SDK for the selected Pi runtime using the actual runtime rather than assuming it is in the launcher's parent directories. This fixes SDK discovery for Windows native `.exe` launchers and NVM-managed installations.
-- External Node.js, Git, and Pi 1.1.0 remain prerequisites; this patch does not bundle those runtimes or migrate existing data.
+- External Node.js, Git, and Pi 1.1.0 remain prerequisites; this release bundles the Auto Mode extension, not those runtimes, and does not migrate existing data.
 
 ## Distribution and data
 
