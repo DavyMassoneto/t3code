@@ -141,6 +141,8 @@ it.layer(NodeServices.layer)("native Pi sessions", (it) => {
       const fixture = yield* makeFixture;
       const filePath = fixture.sessionPath();
       yield* fixture.write(filePath, sessionContents(fixture.workspace));
+      const fileSystem = yield* FileSystem.FileSystem;
+      const canonicalFilePath = yield* fileSystem.realPath(filePath);
       const result = yield* withScanner(fixture, scan);
       expect(result.candidates).toHaveLength(1);
       expect(result.candidates[0]).toMatchObject({
@@ -157,10 +159,10 @@ it.layer(NodeServices.layer)("native Pi sessions", (it) => {
       expect(outcome.thread).toMatchObject({
         source: "pi",
         providerInstanceId: "pi",
-        providerSessionId: filePath,
+        providerSessionId: canonicalFilePath,
         model: "openai/Native-MODEL",
       });
-      expect(outcome.source.filePath).toBe(filePath);
+      expect(outcome.source.filePath).toBe(canonicalFilePath);
       expect(outcome.thread.messages.map((message) => message.text)).toEqual([
         "Work on this project",
         "Completed",
