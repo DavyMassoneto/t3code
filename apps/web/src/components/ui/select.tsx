@@ -109,6 +109,7 @@ function SelectPopup({
   alignOffset = 0,
   alignItemWithTrigger = true,
   matchTriggerWidth = true,
+  size = "default",
   anchor,
   ...props
 }: SelectPrimitive.Popup.Props & {
@@ -118,6 +119,7 @@ function SelectPopup({
   alignOffset?: SelectPrimitive.Positioner.Props["alignOffset"];
   alignItemWithTrigger?: SelectPrimitive.Positioner.Props["alignItemWithTrigger"];
   matchTriggerWidth?: boolean;
+  size?: "default" | "bounded";
   anchor?: SelectPrimitive.Positioner.Props["anchor"];
 }) {
   return (
@@ -133,7 +135,10 @@ function SelectPopup({
         sideOffset={sideOffset}
       >
         <SelectPrimitive.Popup
-          className="origin-(--transform-origin) rounded-lg text-foreground outline-none"
+          className={cn(
+            "origin-(--transform-origin) rounded-lg text-foreground outline-none",
+            size === "bounded" && "w-[min(20rem,var(--available-width),calc(100vw-1rem))]",
+          )}
           data-slot="select-popup"
           {...props}
         >
@@ -146,7 +151,7 @@ function SelectPopup({
           <div
             className={cn(
               "dropdown-glass relative h-full rounded-lg shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)]",
-              matchTriggerWidth && "min-w-(--anchor-width)",
+              size === "default" && matchTriggerWidth && "min-w-(--anchor-width)",
             )}
           >
             <SelectPrimitive.List

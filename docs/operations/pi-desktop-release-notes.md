@@ -1,11 +1,17 @@
-# Pi Desktop 0.0.3
+# Pi Desktop 0.0.4
 
-Release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`, adding an optional bundled native Pi Desktop Auto Mode extension while keeping the Pi runtime external.
+Prepared release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`, replacing blanket Auto Mode execution with per-tool model review and a compact policy picker while keeping the Pi runtime external. Publication is managed by the release owner.
 
-## New in 0.0.3
+## New in 0.0.4
 
-- Bundled Pi Desktop Auto Mode loads as a native Pi extension but stays inactive until explicitly selected and activated. Activation requires one broad confirmation covering arbitrary shell commands, file reads and writes, and network access without a sandbox. Once active, it adds no per-tool confirmations; third-party extensions' tool hooks and UI requests remain authoritative and are not overridden or auto-answered. Activation is session-local and resets when a session starts.
-- The three basic access modes remain available. Generic Auto is no longer selectable in the access-mode picker or default settings; native Auto Mode is a separate, explicit opt-in policy.
+- Bundled Pi Desktop Auto Mode reviews every proposed tool call with the currently selected model through `ctx.modelRegistry.streamSimple`. Only an explicit approval classified as low risk executes automatically. Risky or uncertain calls require user confirmation; denied calls are blocked.
+- Malformed review responses, review errors, a missing model, unavailable confirmation UI, and timeouts fail closed: the extension asks the user when possible or blocks the call, never silently allowing execution. Third-party extensions' tool hooks and UI requests remain authoritative and are not overridden or auto-answered.
+- Auto Mode stays inactive until explicitly selected and activated with confirmation. Activation is session-local and resets when a session starts. Each tool review makes an additional model request billed by the selected provider. Auto Mode is not full access and provides no sandbox or isolation guarantee.
+- The policy popup uses a short Auto Mode label and bounded, wrapped descriptions. The activation confirmation retains the full warning, including shell commands, file reads and writes, network access, the lack of a sandbox, and additional provider charges.
+- The three basic access modes remain available. The separate full-access bypass is unchanged; the Supervised and Auto-accept edits modes remain available. Native Auto Mode is an explicit opt-in policy, not a replacement name for full access.
+
+## Inherited from 0.0.3
+
 - Native Pi policy discovery supports both machine-wide and project-local policies.
 - Corrected the macOS canonical-path trust test fixture. This is a test-only fix, not a runtime behavior change.
 

@@ -207,6 +207,54 @@ describe.each([
   { compact: false, name: "desktop/inline" },
   { compact: true, name: "compact" },
 ])("$name runtime policy selector", ({ compact }) => {
+  it("selects bundled Auto Mode by its short title without conflating third-party policies", async () => {
+    const snapshot = {
+      ...provider,
+      runtimePolicies: [
+        ...provider.runtimePolicies!,
+        {
+          id: "desktop-auto",
+          label: "Auto Mode",
+          extensionName: "Pi Desktop Auto Mode",
+          command: "pi-desktop-policy-desktop-auto",
+        },
+        {
+          id: "team-auto",
+          label: "Auto Mode",
+          extensionName: "Team",
+          description: `Review each tool. ${"long-third-party-metadata".repeat(200)}`,
+          command: "team-auto",
+        },
+        {
+          id: "safety-auto",
+          label: "Auto Mode",
+          extensionName: "Safety",
+          command: "safety-auto",
+        },
+      ],
+    };
+    await renderPicker(compact, false, snapshot);
+    for (const [label, policyId] of [
+      ["Auto Mode", "desktop-auto"],
+      ["Auto Mode · Team", "team-auto"],
+      ["Auto Mode · Safety", "safety-auto"],
+    ]) {
+      await act(() => buttonWithLabel(label!).props.onClick());
+      const draft = useComposerDraftStore.getState().getComposerDraft(target)!;
+      expect(draft.runtimeMode).toBe("auto");
+      expect(draft.modelSelectionByProvider[instanceId]?.options).toEqual([
+        ...base.options!,
+        { id: "piRuntimePolicy", value: policyId },
+      ]);
+      expect(buttonWithLabel(label!).props["aria-checked"]).toBe(true);
+      expect(buttonWithLabel("Full access").props["aria-checked"]).toBe(false);
+    }
+    await act(() => buttonWithLabel("Auto-accept edits").props.onClick());
+    const draft = useComposerDraftStore.getState().getComposerDraft(target)!;
+    expect(draft.runtimeMode).toBe("auto-accept-edits");
+    expect(draft.modelSelectionByProvider[instanceId]?.options).toEqual(base.options);
+  });
+
   it("selects distinct plugin labels and origins, switches within auto, and returns to a built-in without losing effort", async () => {
     await renderPicker(compact);
     await act(() => buttonWithLabel("AUTO · Safety").props.onClick());

@@ -65,3 +65,6 @@ jobs:
 
       - name: Verify native Pi transport without credentials
         run: node apps/server/scripts/pi-native-smoke.ts
+
+      - name: Verify Pi Auto Mode without credentials
+        run: node apps/server/scripts/pi-auto-mode-smoke.ts

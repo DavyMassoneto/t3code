@@ -53,7 +53,7 @@ export function RuntimePolicySelect(props: {
             {selected?.label ?? "Unavailable policy"}
           </SelectValue>
         </TooltipTrigger>
-        <SelectPopup alignItemWithTrigger={false} {...floatingLayerProps}>
+        <SelectPopup size="bounded" alignItemWithTrigger={false} {...floatingLayerProps}>
           {props.choices.map((choice) => {
             const ChoiceIcon = choice.icon;
             return (
@@ -62,15 +62,16 @@ export function RuntimePolicySelect(props: {
                 value={choice.value}
                 disabled={choice.disabled}
                 hideIndicator
-                className="min-w-64"
               >
                 <div className="flex min-w-0 items-center gap-3">
                   <div className="grid min-w-0 flex-1 gap-0.5">
-                    <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+                    <span className="flex min-w-0 items-start gap-1.5 font-medium text-foreground">
                       <ChoiceIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                      {choice.label}
+                      <span className="min-w-0 whitespace-normal [overflow-wrap:anywhere]">
+                        {choice.label}
+                      </span>
                     </span>
-                    <span className="text-muted-foreground text-xs leading-4">
+                    <span className="whitespace-normal text-muted-foreground text-xs leading-4 [overflow-wrap:anywhere]">
                       {choice.description}
                     </span>
                   </div>

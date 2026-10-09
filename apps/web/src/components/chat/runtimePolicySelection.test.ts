@@ -68,7 +68,7 @@ describe("runtime policy selection", () => {
     expect(picker.choices.filter((choice) => choice.label.startsWith("Auto Mode"))).toEqual([
       expect.objectContaining({
         value: "policy:desktop-auto",
-        label: "Auto Mode · Pi Desktop Auto Mode",
+        label: "Auto Mode",
       }),
     ]);
     const next = selectRuntimePolicyChoice(desktopProvider, selection, "policy:desktop-auto")!;
@@ -82,6 +82,32 @@ describe("runtime policy selection", () => {
     ).toMatchObject({ value: "policy:desktop-auto", blockedReason: null });
     expect(selectRuntimePolicyChoice(desktopProvider, selection, "auto")).toBeNull();
   });
+
+  it.each([
+    { id: "desktop-auto", command: "third-party-auto" },
+    { id: "third-party-auto", command: "pi-desktop-policy-desktop-auto" },
+  ])(
+    "preserves third-party origin unless both bundled identifiers match: $id / $command",
+    (identity) => {
+      const thirdPartyProvider = {
+        ...provider,
+        runtimePolicies: [{ ...identity, label: "Auto Mode", extensionName: "Third Party" }],
+      };
+      const picker = resolveRuntimePolicyPicker(thirdPartyProvider, "approval-required", selection);
+      const choice = picker.choices.find(
+        (candidate) => candidate.label === "Auto Mode · Third Party",
+      )!;
+      const next = selectRuntimePolicyChoice(thirdPartyProvider, selection, choice.value)!;
+      expect(next.runtimeMode).toBe("auto");
+      expect(next.modelSelection.options).toEqual([
+        ...selection.options!,
+        { id: PI_RUNTIME_POLICY_OPTION_ID, value: identity.id },
+      ]);
+      expect(
+        resolveRuntimePolicyPicker(thirdPartyProvider, next.runtimeMode, next.modelSelection),
+      ).toMatchObject({ value: choice.value, blockedReason: null });
+    },
+  );
 
   it("keeps legacy auto unavailable until a built-in or named policy is explicitly selected", () => {
     expect(runtimeModeConfig.auto.label).toBe("Unavailable mode · auto");

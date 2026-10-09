@@ -48,7 +48,10 @@ export function resolveRuntimePolicyPicker(
   for (const policy of policies) {
     choices.push({
       value: policyValue(policy.id),
-      label: `${policy.label} · ${policy.extensionName}`,
+      label:
+        policy.id === "desktop-auto" && policy.command === "pi-desktop-policy-desktop-auto"
+          ? "Auto Mode"
+          : `${policy.label} · ${policy.extensionName}`,
       description: policy.description ?? `Runtime policy from ${policy.extensionName}.`,
       icon: SparklesIcon,
     });

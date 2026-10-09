@@ -30,13 +30,20 @@ extension. Its policy ID is `desktop-auto`, its label is `Auto Mode`, and its na
 command `pi-desktop-policy-desktop-auto` advertises the discovery descriptor through
 `get_commands`. Discovery loads this extension without injecting the MCP bridge.
 
-Loading the extension leaves it passive and inactive. Activation requires one broad
-confirmation covering arbitrary shell commands, file reads and writes, and network
-access with no sandbox. Once active, it adds no per-tool confirmations or blocking
-hook; other extensions' tool hooks and UI requests remain authoritative and are
-never overridden or auto-answered. State is session-local and resets on `session_start`.
-Automatic approvals are not a model autonomous loop or retry mechanism, and are not
-a security sandbox.
+Loading the extension leaves it passive and inactive. Activation confirms risk-based
+reviews and extra model calls, not blanket tool access. Every active `tool_call` uses
+the current session model through native `ctx.modelRegistry.streamSimple`, without
+reviewer tools. Only strict JSON `approve` plus `low` runs automatically; risky or
+uncertain actions require explicit confirmation and `deny` blocks with a reason.
+The reviewer receives only the latest actual user task and bounded proposed action,
+cwd, and tool source metadata, never assistant/tool text as user authorization.
+Missing context/API/model, malformed or incomplete results, oversized input, and a
+15-second review timeout fall back to confirmation, never automatic approval. No UI,
+declined/failed confirmations, and cancelled or superseded work block execution.
+Stop signals, session changes, shutdown, and deactivation invalidate pending reviews.
+Other extensions' hooks and dialogs remain authoritative and are not auto-answered.
+State is session-local. Reviews are not a safety guarantee, autonomous loop, retry
+mechanism, or security sandbox.
 
 Standalone CLI usage, optional installation, and security limits are documented in
 `extensions/pi-desktop-auto-mode/README.md`.

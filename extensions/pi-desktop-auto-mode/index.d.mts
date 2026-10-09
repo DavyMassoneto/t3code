@@ -1,4 +1,30 @@
 export interface PiDesktopAutoModeContext {
+  readonly hasUI: boolean;
+  readonly cwd: string;
+  readonly signal?: AbortSignal;
+  readonly model?: unknown;
+  readonly modelRegistry?: {
+    readonly streamSimple: (
+      model: unknown,
+      context: {
+        systemPrompt: string;
+        messages: Array<{ role: "user"; content: string; timestamp: number }>;
+        tools?: undefined;
+      },
+      options: { maxTokens: number; reasoning: "minimal"; signal: AbortSignal },
+    ) => {
+      result(): Promise<{
+        stopReason: string;
+        content: Array<{ type: string; text?: string }>;
+      }>;
+    };
+  };
+  readonly sessionManager: {
+    getBranch(): Array<{
+      type: string;
+      message?: { role: string; content: string | Array<{ type: string; text?: string }> };
+    }>;
+  };
   readonly ui: {
     readonly confirm: (title: string, message: string) => Promise<boolean>;
     readonly notify: (message: string, severity: "info" | "warning") => void;
@@ -7,9 +33,10 @@ export interface PiDesktopAutoModeContext {
 }
 
 export interface PiDesktopAutoModeAPI {
+  readonly getAllTools?: () => Array<{ name: string; sourceInfo?: unknown }>;
   readonly on: (
-    event: "session_start",
-    handler: (event: unknown, ctx: PiDesktopAutoModeContext) => void,
+    event: "session_start" | "session_shutdown" | "agent_end" | "tool_call",
+    handler: (event: unknown, ctx: PiDesktopAutoModeContext) => unknown,
   ) => void;
   readonly registerCommand: (
     name: string,
