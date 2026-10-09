@@ -4,6 +4,7 @@ import { ProviderInstanceId, type PiSettings } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -16,6 +17,17 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../../config.ts";
 import * as IdAllocator from "../../orchestration-v2/IdAllocator.ts";
+import {
+  PI_DESKTOP_AUTO_MODE_EXTENSION_FILENAME,
+  PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE,
+} from "../../orchestration-v2/Adapters/piDesktopAutoModeExtensionSource.ts";
+import {
+  PI_T3_MCP_EXTENSION_FILENAME,
+  T3_MCP_URL_ENV,
+  T3_MCP_BEARER_ENV,
+  T3_PI_RUNTIME_MODE_ENV,
+  T3_PI_POLICY_TOKEN_ENV,
+} from "../../orchestration-v2/Adapters/piT3McpExtensionSource.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { PiDriver } from "./PiDriver.ts";
 
@@ -44,6 +56,7 @@ const personalSkill = {
 
 // Respond through the real stdio transport, with a distinct command catalog for each cwd.
 const makePiSpawner = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
   const pendingCommand = yield* Deferred.make<void>();
   const launches: Array<ChildProcess.StandardCommand> = [];
   const spawner = ChildProcessSpawner.make((command) =>
@@ -52,6 +65,40 @@ const makePiSpawner = Effect.gen(function* () {
       if (!ChildProcess.isStandardCommand(command)) return yield* Effect.die("Unexpected pipeline");
       launches.push(command);
       const version = command.args.includes("--version");
+      if (!version) {
+        const extensionPaths = command.args.flatMap((arg, index) =>
+          arg === "--extension" ? [command.args[index + 1]] : [],
+        );
+        assert.equal(extensionPaths.length, 1);
+        const extensionPath = extensionPaths[0];
+        assert.isDefined(extensionPath);
+        assert.isTrue(
+          extensionPath!
+            .replace(/\\/g, "/")
+            .endsWith(`/${PI_DESKTOP_AUTO_MODE_EXTENSION_FILENAME}`),
+        );
+        assert.equal(
+          yield* fs.readFileString(extensionPath!),
+          PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE,
+        );
+        assert.isFalse(
+          command.args.some(
+            (arg) =>
+              arg === "-e" ||
+              arg.startsWith("-e=") ||
+              arg.startsWith("--extension=") ||
+              arg.includes(PI_T3_MCP_EXTENSION_FILENAME),
+          ),
+        );
+        for (const name of [
+          T3_MCP_URL_ENV,
+          T3_MCP_BEARER_ENV,
+          T3_PI_RUNTIME_MODE_ENV,
+          T3_PI_POLICY_TOKEN_ENV,
+        ]) {
+          assert.isUndefined(command.options.env?.[name]);
+        }
+      }
       const stdout = yield* Queue.unbounded<Uint8Array>();
       const cwd = command.options.cwd;
       return ChildProcessSpawner.makeHandle({
@@ -167,7 +214,16 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
       );
       assert.deepEqual(second.runtimePolicies, []);
       assert.deepEqual(machine.runtimePolicies, []);
-      assert.isFalse(launches.some((launch) => launch.args.includes("--extension")));
+      assert.deepEqual(
+        [
+          ...new Set(
+            launches
+              .filter((launch) => launch.args.includes("--mode"))
+              .map((launch) => launch.options.cwd),
+          ),
+        ].sort(),
+        ["/first", "/machine", "/second"],
+      );
       assert.deepEqual(
         machine.skills.map((skill) => skill.name),
         ["personal"],
