@@ -1,6 +1,13 @@
-# Pi Desktop 0.0.1
+# Pi Desktop 0.0.2
 
-First native desktop release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`.
+Patch release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`, fixing native Pi SDK discovery in the installed Windows application.
+
+## Fix in 0.0.2
+
+- Discover the npm-installed SDK for the selected Pi runtime using the actual runtime rather than assuming it is in the launcher's parent directories. This fixes SDK discovery for Windows native `.exe` launchers and NVM-managed installations.
+- External Node.js, Git, and Pi 1.1.0 remain prerequisites; this patch does not bundle those runtimes or migrate existing data.
+
+## Distribution and data
 
 - Windows x64 NSIS installer; macOS arm64 and x64 DMG/ZIP; Linux x64 AppImage and Debian package.
 - Independent Pi Desktop application identity, `pi-desktop://` links, Electron profile, and `~/.pi-desktop/userdata` server state. Existing T3 Code installations and default data are not migrated or overwritten. Pi's own credentials and sessions remain in `~/.pi`.

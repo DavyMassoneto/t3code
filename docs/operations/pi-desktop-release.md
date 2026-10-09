@@ -1,6 +1,6 @@
 # Publishing Pi Desktop
 
-The release owner manages commits, tags, and publication. The dedicated `Pi Desktop Release` workflow builds from a stable `vX.Y.Z` tag on fork `main`; `v0.0.1` must match version `0.0.1` in `apps/desktop/package.json`. Push the tag or manually dispatch the workflow with the existing tag. Do not use the upstream `Release` workflow: its entry job and npm publisher are restricted to `pingdotgg/t3code`.
+The release owner manages commits, tags, and publication. The dedicated `Pi Desktop Release` workflow builds from a stable `vX.Y.Z` tag on fork `main`; `v0.0.2` must match version `0.0.2` in `apps/desktop/package.json`. Push the tag or manually dispatch the workflow with the existing tag. Do not use the upstream `Release` workflow: its entry job and npm publisher are restricted to `pingdotgg/t3code`.
 
 Standard GitHub Windows x64, macOS arm64/x64, and Linux x64 runners build directly with `scripts/build-desktop-artifact.ts`. Each runner installs Rust and native prerequisites; the script builds the resource monitor and platform helpers itself. There is no dependency on upstream JavaScript or CLI release artifacts, no npm publication, no signing secrets, and no bundled Pi runtime. The Windows build does not embed a WSL runtime; use the native Windows backend for this initial release.
 
@@ -11,7 +11,7 @@ Before each release, update the desktop version and release notes, validate the 
 For a local artifact on a host with its native toolchain installed:
 
 ```sh
-node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 --build-version 0.0.1 --output-dir release --verbose
+node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 --build-version 0.0.2 --output-dir release --verbose
 ```
 
 Use `mac/dmg` or `linux/AppImage` on those hosts. Keep `T3CODE_DESKTOP_UPDATE_REPOSITORY=DavyMassoneto/t3code`; other repository destinations are rejected as update sources. Leave signing disabled. Do not set `T3CODE_HOME` to T3 Code's state directory.

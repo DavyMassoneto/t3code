@@ -18,6 +18,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as PiPackages from "./PiPackages.ts";
+import { resolveNativePiSdkRoot } from "./nativePiSdkRoot.ts";
 
 const catalog =
   '<form class="packages-action-bar"></form><article data-package-card="true" data-package-name="fixture-package" data-package-types="extension skill"><a href="/packages/fixture-package" data-package-link="true">fixture-package</a><p class="packages-desc">A &amp; B</p><button data-copy-text="pi install npm:fixture-package"></button></article>';
@@ -25,6 +26,67 @@ const projectId = ProjectId.make("package-project");
 const instanceId = ProviderInstanceId.make("package-instance");
 
 describe("PiPackages", () => {
+  it.effect.skipIf(!process.env.T3_PI_INSTALLED_BINARY || !process.env.T3_PI_PROBE_ORIGINAL_PATH)(
+    "smokes the selected installed Windows wrapper with the original outer PATH",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({
+          directory: path.resolve("."),
+          prefix: ".pi-sdk-smoke-",
+        });
+        const binaryPath = process.env.T3_PI_INSTALLED_BINARY ?? "";
+        const originalPath = process.env.T3_PI_PROBE_ORIGINAL_PATH ?? "";
+        const agentDir = path.join(directory, "agent");
+        const home = path.join(directory, "home");
+        yield* fs.makeDirectory(agentDir);
+        yield* fs.makeDirectory(home);
+        const environment = {
+          ...process.env,
+          PATH: originalPath,
+          HOME: home,
+          USERPROFILE: home,
+          PI_CODING_AGENT_DIR: agentDir,
+        };
+        const sdkRoot = yield* resolveNativePiSdkRoot({ binaryPath, environment });
+        expect(sdkRoot).toBeDefined();
+        yield* Effect.log({ binaryPath, sdkRoot });
+        const service = yield* PiPackages.PiPackages.pipe(
+          Effect.provide(
+            Layer.provide(
+              PiPackages.layer,
+              Layer.mergeAll(
+                ServerConfig.layerTest(directory, path.join(directory, "t3")),
+                ServerSettings.layerTest({
+                  providerInstances: {
+                    [instanceId]: {
+                      driver: "pi",
+                      config: { binaryPath },
+                      environment: Object.entries({
+                        PATH: originalPath,
+                        HOME: home,
+                        USERPROFILE: home,
+                        PI_CODING_AGENT_DIR: agentDir,
+                      }).map(([name, value]) => ({ name, value, sensitive: false })),
+                    },
+                  },
+                }),
+                Layer.succeed(
+                  ProjectService.ProjectService,
+                  {} as ProjectService.ProjectService["Service"],
+                ),
+                Layer.succeed(
+                  HttpClient.HttpClient,
+                  HttpClient.make(() => Effect.die("No catalog calls in installed SDK smoke")),
+                ),
+              ),
+            ),
+          ),
+        );
+        expect((yield* service.list({ instanceId, scope: "global" })).packages).toEqual([]);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
   it("projects genuine author, monthly downloads and epoch-millisecond publication metadata", () => {
     const dated = catalog
       .replace(
@@ -302,157 +364,196 @@ describe("PiPackages", () => {
     );
   }
 
-  it.effect("lists through the instance's native SDK with explicit directory and destination", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-packages-test-" });
-      const binary = path.join(root, "pi");
-      const agentDir = path.join(root, "instance-agent");
-      yield* fs.writeFileString(binary, "fixture");
-      yield* fs.makeDirectory(path.join(root, "dist", "core"), { recursive: true });
-      yield* fs.writeFileString(path.join(root, "dist", "core", "package-manager.js"), "fixture");
-      const launches: ChildProcess.Command[] = [];
-      let nativeExitCode = 0;
-      let nativeStderr = "";
-      let hangNative = false;
-      let nativeCleanups = 0;
-      const nativeStarted = yield* Deferred.make<void>();
-      const spawner = ChildProcessSpawner.make((command) => {
-        launches.push(command);
-        return Effect.gen(function* () {
-          if (hangNative) {
-            yield* Effect.addFinalizer(() =>
-              Effect.sync(() => {
-                nativeCleanups += 1;
+  it.effect.each(["direct", "native-shim"])(
+    "lists through the instance's %s SDK with explicit directory and destination",
+    (launcher) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-packages-test-" });
+        const runtimeCli = path.join(root, "cli.js");
+        const binary = launcher === "direct" ? runtimeCli : path.join(root, ".shim", "pi.exe");
+        const agentDir = path.join(root, "instance-agent");
+        yield* fs.makeDirectory(path.dirname(binary), { recursive: true });
+        yield* fs.writeFileString(binary, "fixture");
+        yield* fs.writeFileString(runtimeCli, "fixture");
+        yield* fs.writeFileString(
+          path.join(root, "package.json"),
+          JSON.stringify({
+            name: "@earendil-works/pi-coding-agent",
+            bin: { pi: "cli.js" },
+          }),
+        );
+        yield* fs.makeDirectory(path.join(root, "dist", "core"), { recursive: true });
+        yield* fs.writeFileString(path.join(root, "dist", "core", "package-manager.js"), "fixture");
+        for (const module of ["auth-storage.js", "model-runtime.js"])
+          yield* fs.writeFileString(path.join(root, "dist", "core", module), "fixture");
+        const launches: ChildProcess.Command[] = [];
+        let nativeExitCode = 0;
+        let nativeStderr = "";
+        let hangNative = false;
+        let nativeCleanups = 0;
+        const nativeStarted = yield* Deferred.make<void>();
+        const spawner = ChildProcessSpawner.make((command) => {
+          if (ChildProcess.isStandardCommand(command) && command.args[0] === "--version") {
+            const output = `T3_PI_SDK_RUNTIME:${JSON.stringify({ cli: runtimeCli, node: runtimeCli })}\n1.1.0\n`;
+            return Effect.succeed(
+              ChildProcessSpawner.makeHandle({
+                pid: ChildProcessSpawner.ProcessId(900_000_002),
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+                isRunning: Effect.succeed(false),
+                kill: () => Effect.void,
+                unref: Effect.succeed(Effect.void),
+                stdin: Sink.drain,
+                stdout: Stream.succeed(new TextEncoder().encode(output)),
+                stderr: Stream.empty,
+                all: Stream.empty,
+                getInputFd: () => Sink.drain,
+                getOutputFd: () => Stream.empty,
               }),
             );
-            yield* Deferred.succeed(nativeStarted, undefined);
           }
-          return ChildProcessSpawner.makeHandle({
-            pid: ChildProcessSpawner.ProcessId(900_000_001),
-            exitCode: hangNative
-              ? Effect.never
-              : Effect.succeed(ChildProcessSpawner.ExitCode(nativeExitCode)),
-            isRunning: Effect.succeed(false),
-            kill: () => Effect.void,
-            unref: Effect.succeed(Effect.void),
-            stdin: Sink.drain,
-            stdout: Stream.succeed(
-              new TextEncoder().encode('T3_PI_PACKAGES:{"packages":[],"scopeLabel":"fixture"}\n'),
-            ),
-            stderr: Stream.succeed(new TextEncoder().encode(nativeStderr)),
-            all: Stream.empty,
-            getInputFd: () => Sink.drain,
-            getOutputFd: () => Stream.empty,
+          launches.push(command);
+          return Effect.gen(function* () {
+            if (hangNative) {
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  nativeCleanups += 1;
+                }),
+              );
+              yield* Deferred.succeed(nativeStarted, undefined);
+            }
+            return ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(900_000_001),
+              exitCode: hangNative
+                ? Effect.never
+                : Effect.succeed(ChildProcessSpawner.ExitCode(nativeExitCode)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.succeed(
+                new TextEncoder().encode('T3_PI_PACKAGES:{"packages":[],"scopeLabel":"fixture"}\n'),
+              ),
+              stderr: Stream.succeed(new TextEncoder().encode(nativeStderr)),
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            });
           });
         });
-      });
-      let galleryHtml = catalog;
-      let hangGallery = false;
-      const requests: string[] = [];
-      const galleryStarted = yield* Deferred.make<void>();
-      const service = yield* PiPackages.PiPackages.pipe(
-        Effect.provide(
-          Layer.provide(
-            PiPackages.layer,
-            Layer.mergeAll(
-              ServerConfig.layerTest(root, path.join(root, "t3")),
-              ServerSettings.layerTest({
-                providerInstances: {
-                  [instanceId]: {
-                    driver: "pi",
-                    config: {},
-                    environment: [
-                      { name: "PI_CODING_AGENT_DIR", value: agentDir, sensitive: false },
-                    ],
+        let galleryHtml = catalog;
+        let hangGallery = false;
+        const requests: string[] = [];
+        const galleryStarted = yield* Deferred.make<void>();
+        const service = yield* PiPackages.PiPackages.pipe(
+          Effect.provide(
+            Layer.provide(
+              PiPackages.layer,
+              Layer.mergeAll(
+                ServerConfig.layerTest(root, path.join(root, "t3")),
+                ServerSettings.layerTest({
+                  providerInstances: {
+                    [instanceId]: {
+                      driver: "pi",
+                      config: {},
+                      environment: [
+                        { name: "PI_CODING_AGENT_DIR", value: agentDir, sensitive: false },
+                      ],
+                    },
                   },
-                },
-              }),
-              Layer.succeed(
-                ProjectService.ProjectService,
-                {} as ProjectService.ProjectService["Service"],
-              ),
-              Layer.succeed(
-                HttpClient.HttpClient,
-                HttpClient.make((request) => {
-                  requests.push(request.url);
-                  return hangGallery
-                    ? Deferred.succeed(galleryStarted, undefined).pipe(Effect.andThen(Effect.never))
-                    : Effect.succeed(
-                        HttpClientResponse.fromWeb(request, new Response(galleryHtml)),
-                      );
                 }),
+                Layer.succeed(
+                  ProjectService.ProjectService,
+                  {} as ProjectService.ProjectService["Service"],
+                ),
+                Layer.succeed(
+                  HttpClient.HttpClient,
+                  HttpClient.make((request) => {
+                    requests.push(request.url);
+                    return hangGallery
+                      ? Deferred.succeed(galleryStarted, undefined).pipe(
+                          Effect.andThen(Effect.never),
+                        )
+                      : Effect.succeed(
+                          HttpClientResponse.fromWeb(request, new Response(galleryHtml)),
+                        );
+                  }),
+                ),
+                Layer.succeed(HostProcessPlatform, launcher === "direct" ? "linux" : "win32"),
+                Layer.succeed(SpawnExecutableResolution, () => binary),
+                Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
               ),
-              Layer.succeed(HostProcessPlatform, "linux"),
-              Layer.succeed(SpawnExecutableResolution, () => binary),
-              Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
             ),
           ),
-        ),
-      );
-      expect((yield* service.list({ instanceId, scope: "global" })).packages).toEqual([]);
-      expect(launches).toHaveLength(1);
-      nativeExitCode = 1;
-      nativeStderr = "https://user:private-token@git.example.invalid/repo";
-      const failed = yield* service
-        .mutate({
-          instanceId,
-          scope: "global",
-          source: "npm:test-fixture",
-          action: "update",
-          consent: true,
-        })
-        .pipe(Effect.flip);
-      expect(failed.message).toContain("diagnostics are withheld");
-      expect(failed.message).not.toContain("private-token");
-      nativeExitCode = 0;
-      hangNative = true;
-      const nativeFiber = yield* service
-        .list({ instanceId, scope: "global" })
-        .pipe(Effect.forkChild);
-      yield* Deferred.await(nativeStarted);
-      yield* TestClock.adjust("21 seconds");
-      expect((yield* Fiber.join(nativeFiber).pipe(Effect.flip)).message).toContain("timed out");
-      expect(nativeCleanups).toBe(1);
-      const found = yield* service.search({
-        query: "fixture & package",
-        type: "skill",
-        sort: "recent",
-        page: 2,
-      });
-      expect(found.packages).toHaveLength(1);
-      expect(requests[0]).toBe(
-        "https://pi.dev/packages?name=fixture+%26+package&type=skill&sort=recent&page=2",
-      );
-      const requestCount = requests.length;
-      for (const page of [0, -1, 1.5, NaN, Infinity, 1000001])
-        yield* service.search({ query: "", page }).pipe(Effect.flip);
-      expect(requests).toHaveLength(requestCount);
-      galleryHtml = "x".repeat(8 * 1024 * 1024 + 1);
-      expect((yield* service.search({ query: "" }).pipe(Effect.flip)).message).toContain(
-        "exceeded its limit",
-      );
-      hangGallery = true;
-      const galleryFiber = yield* service.search({ query: "" }).pipe(Effect.forkChild);
-      yield* Deferred.await(galleryStarted);
-      yield* TestClock.adjust("16 seconds");
-      expect((yield* Fiber.join(galleryFiber).pipe(Effect.flip)).message).toContain("timed out");
-      const launch = launches[0];
-      expect(launch && ChildProcess.isStandardCommand(launch)).toBe(true);
-      if (launch && ChildProcess.isStandardCommand(launch)) {
-        expect(JSON.parse(launch.args.at(-1) ?? "")).toMatchObject({
-          agentDir,
-          scope: "global",
-          sdkRoot: root,
-          cwd: root,
+        );
+        expect((yield* service.list({ instanceId, scope: "global" })).packages).toEqual([]);
+        expect(launches).toHaveLength(1);
+        nativeExitCode = 1;
+        nativeStderr = "https://user:private-token@git.example.invalid/repo";
+        const failed = yield* service
+          .mutate({
+            instanceId,
+            scope: "global",
+            source: "npm:test-fixture",
+            action: "update",
+            consent: true,
+          })
+          .pipe(Effect.flip);
+        expect(failed.message).toContain("diagnostics are withheld");
+        expect(failed.message).not.toContain("private-token");
+        nativeExitCode = 0;
+        hangNative = true;
+        const nativeFiber = yield* service
+          .list({ instanceId, scope: "global" })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(nativeStarted);
+        yield* TestClock.adjust("21 seconds");
+        expect((yield* Fiber.join(nativeFiber).pipe(Effect.flip)).message).toContain("timed out");
+        expect(nativeCleanups).toBe(1);
+        const found = yield* service.search({
+          query: "fixture & package",
+          type: "skill",
+          sort: "recent",
+          page: 2,
         });
-      }
-      yield* service.list({ instanceId, scope: "global", projectId }).pipe(Effect.flip);
-      yield* service
-        .mutate({ instanceId, scope: "global", source: "--all", action: "update", consent: true })
-        .pipe(Effect.flip);
-      expect(launches).toHaveLength(3);
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+        expect(found.packages).toHaveLength(1);
+        expect(requests[0]).toBe(
+          "https://pi.dev/packages?name=fixture+%26+package&type=skill&sort=recent&page=2",
+        );
+        const requestCount = requests.length;
+        for (const page of [0, -1, 1.5, NaN, Infinity, 1000001])
+          yield* service.search({ query: "", page }).pipe(Effect.flip);
+        expect(requests).toHaveLength(requestCount);
+        galleryHtml = "x".repeat(8 * 1024 * 1024 + 1);
+        expect((yield* service.search({ query: "" }).pipe(Effect.flip)).message).toContain(
+          "exceeded its limit",
+        );
+        hangGallery = true;
+        const galleryFiber = yield* service.search({ query: "" }).pipe(Effect.forkChild);
+        yield* Deferred.await(galleryStarted);
+        yield* TestClock.adjust("16 seconds");
+        expect((yield* Fiber.join(galleryFiber).pipe(Effect.flip)).message).toContain("timed out");
+        const launch = launches[0];
+        expect(launch && ChildProcess.isStandardCommand(launch)).toBe(true);
+        if (launch && ChildProcess.isStandardCommand(launch)) {
+          expect(JSON.parse(launch.args.at(-1) ?? "")).toMatchObject({
+            agentDir,
+            scope: "global",
+            sdkRoot: root,
+            cwd: root,
+          });
+        }
+        yield* service.list({ instanceId, scope: "global", projectId }).pipe(Effect.flip);
+        yield* service
+          .mutate({ instanceId, scope: "global", source: "--all", action: "update", consent: true })
+          .pipe(Effect.flip);
+        expect(launches).toHaveLength(3);
+        yield* fs.remove(path.join(root, "dist", "core", "package-manager.js"));
+        expect(
+          (yield* service.list({ instanceId, scope: "global" }).pipe(Effect.flip)).message,
+        ).toContain("does not expose its native package SDK");
+        expect(launches).toHaveLength(3);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

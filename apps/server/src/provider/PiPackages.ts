@@ -27,6 +27,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
 import { resolveNativePiAgentDirectory } from "./nativePiAgentDirectory.ts";
+import { resolveNativePiSdkRoot } from "./nativePiSdkRoot.ts";
 import { PI_PACKAGE_NATIVE_SOURCE } from "./piPackageNativeSource.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 import * as Stream from "effect/Stream";
@@ -340,26 +341,25 @@ const make = Effect.gen(function* () {
     }
     const binary = executable(expandHomePathWith(pi.binaryPath || "pi", path), platform, env);
     if (!binary) return yield* error("The selected Pi executable could not be found.");
-    const realBinary = yield* fs.realPath(binary);
-    let directory = path.dirname(realBinary);
-    let sdkRoot: string | undefined;
-    for (let depth = 0; depth < 6 && sdkRoot === undefined; depth += 1) {
-      for (const candidate of [
-        directory,
-        path.join(directory, "node_modules", "@earendil-works", "pi-coding-agent"),
-        path.join(directory, "lib", "node_modules", "@earendil-works", "pi-coding-agent"),
-      ]) {
-        if (yield* fs.exists(path.join(candidate, "dist", "core", "package-manager.js"))) {
-          sdkRoot = candidate;
-          break;
-        }
-      }
-      directory = path.dirname(directory);
-    }
+    const sdkRoot = yield* resolveNativePiSdkRoot({ binaryPath: binary, environment: env }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+      Effect.provideService(SpawnExecutableResolution, executable),
+      Effect.provideService(HostProcessPlatform, platform),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
     if (!sdkRoot)
       return yield* error(
         "This Pi installation does not expose its native package SDK. Use an npm Pi installation to manage packages here.",
       );
+    const packageManager = yield* fs
+      .realPath(path.join(sdkRoot, "dist", "core", "package-manager.js"))
+      .pipe(Effect.orElseSucceed(() => undefined));
+    if (!packageManager)
+      return yield* error("This Pi installation does not expose its native package SDK.");
+    const relative = path.relative(sdkRoot, packageManager);
+    if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`))
+      return yield* error("This Pi installation does not expose its native package SDK.");
     return {
       sdkRoot,
       agentDir,

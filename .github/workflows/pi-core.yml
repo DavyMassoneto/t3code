@@ -43,6 +43,10 @@ jobs:
           vp test run
           apps/server/src/provider/PiCommands.test.ts
           apps/server/src/provider/PiProvider.test.ts
+          apps/server/src/provider/nativePiSdkRoot.test.ts
+          apps/server/src/provider/PiPackages.test.ts
+          apps/server/src/provider/PiPackagesAuthorization.test.ts
+          apps/server/src/provider/PiPackagesStorageLocks.test.ts
           apps/server/src/provider/piThinkingCapabilities.test.ts
           apps/server/src/provider/Drivers/PiDriver.test.ts
           apps/server/src/orchestration-v2/Adapters/PiAdapterV2.test.ts

@@ -32,12 +32,21 @@ describe("Pi package storage locks", () => {
         const cwd = path.join(root, "project");
         const agentA = path.join(root, "agent-a");
         const agentB = path.join(root, "agent-b");
-        const binary = path.join(root, "pi");
+        const binary = path.join(root, "cli.js");
         const managerPath = path.join(root, "dist", "core", "package-manager.js");
         yield* fs.makeDirectory(cwd);
         yield* fs.makeDirectory(path.dirname(managerPath), { recursive: true });
         yield* fs.writeFileString(managerPath, "fixture");
         yield* fs.writeFileString(binary, "fixture");
+        yield* fs.writeFileString(
+          path.join(root, "package.json"),
+          JSON.stringify({
+            name: "@earendil-works/pi-coding-agent",
+            bin: { pi: "cli.js" },
+          }),
+        );
+        for (const module of ["auth-storage.js", "model-runtime.js"])
+          yield* fs.writeFileString(path.join(root, "dist", "core", module), "fixture");
         for (const agentDir of [agentA, agentB]) {
           yield* fs.makeDirectory(agentDir);
           yield* fs.writeFileString(path.join(agentDir, "trust.json"), encodeJson({ [cwd]: true }));
@@ -52,8 +61,8 @@ describe("Pi package storage locks", () => {
         let sdkResolutions = 0;
         const fsWithSignal = {
           ...fs,
-          exists: (filename: string) =>
-            fs.exists(filename).pipe(
+          realPath: (filename: string) =>
+            fs.realPath(filename).pipe(
               Effect.tap(() => {
                 if (filename !== managerPath) return Effect.void;
                 sdkResolutions += 1;
