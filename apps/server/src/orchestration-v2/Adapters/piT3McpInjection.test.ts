@@ -12,9 +12,14 @@ import {
 } from "./piT3McpExtensionSource.ts";
 import {
   buildPiRpcLaunch,
+  materializePiDesktopAutoModeExtension,
   materializePiT3McpExtension,
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
+import {
+  PI_DESKTOP_AUTO_MODE_EXTENSION_FILENAME,
+  PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE,
+} from "./piDesktopAutoModeExtensionSource.ts";
 
 const threadId = ThreadId.make("thread-pi-t3-mcp");
 
@@ -29,6 +34,78 @@ const mcpSession = {
 };
 
 describe("pi T3 MCP injection", () => {
+  it("loads Auto Mode once without selecting it and preserves other explicit extensions", () => {
+    const path = "/cache/pi-desktop-auto-mode-extension.mjs";
+    const launch = buildPiRpcLaunch({
+      launchArgs: ["--extension", path, `-e=${path}`, "-e", "/user/demo.ts"],
+      environment: {},
+      mcpSession: undefined,
+      extensionPath: "/cache/pi-t3-mcp-extension.ts",
+      autoModeExtensionPath: path,
+    });
+    assert.deepEqual(launch.args, [
+      "--mode",
+      "rpc",
+      "--extension",
+      path,
+      "-e",
+      "/user/demo.ts",
+      "--extension",
+      "/cache/pi-t3-mcp-extension.ts",
+    ]);
+    assert.isUndefined(launch.env.T3_PI_RUNTIME_MODE);
+    assert.isUndefined(launch.env.T3_PI_POLICY_TOKEN);
+  });
+
+  it.each(["disableExtensions", "disableTools"] as const)(
+    "excludes both bundled extensions for %s isolation",
+    (restriction) => {
+      const launch = buildPiRpcLaunch({
+        launchArgs: ["-e=/user/demo.ts", "--extension", "/user/other.ts"],
+        environment: { T3_PI_POLICY_TOKEN: "stale" },
+        mcpSession,
+        extensionPath: "/cache/bridge.ts",
+        autoModeExtensionPath: "/cache/auto.mjs",
+        [restriction]: true,
+      });
+      assert.deepEqual(launch.args, [
+        "--mode",
+        "rpc",
+        "--no-extensions",
+        ...(restriction === "disableTools" ? ["--no-tools"] : []),
+      ]);
+      assert.isFalse(launch.hasT3Mcp);
+      assert.isUndefined(launch.env.T3_PI_POLICY_TOKEN);
+    },
+  );
+
+  it.effect("materializes and refreshes the cached Auto Mode source without rewriting it", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-auto-" });
+      const dest = yield* materializePiDesktopAutoModeExtension(cacheDir);
+      assert.isTrue(dest.endsWith(PI_DESKTOP_AUTO_MODE_EXTENSION_FILENAME));
+      assert.equal(yield* fs.readFileString(dest), PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE);
+      const writes: string[] = [];
+      const trackingFs = {
+        ...fs,
+        writeFileString: (path: string, source: string) => {
+          writes.push(path);
+          return fs.writeFileString(path, source);
+        },
+      };
+      yield* materializePiDesktopAutoModeExtension(cacheDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, trackingFs),
+      );
+      assert.deepEqual(writes, []);
+      yield* fs.writeFileString(dest, "stale");
+      yield* materializePiDesktopAutoModeExtension(cacheDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, trackingFs),
+      );
+      assert.deepEqual(writes, [dest]);
+      assert.equal(yield* fs.readFileString(dest), PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
   it("always adds the permission bridge and configures MCP when available", () => {
     const resolvedArgs = resolvePiLaunchArgs(
       "--extension=/home/user/.pi/agent/extensions/demo.ts --session-dir=/tmp/pi-sessions --provider=anthropic --model=claude-sonnet --tools='' --name=-review --extension-flag=kept",

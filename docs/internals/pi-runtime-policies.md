@@ -23,6 +23,24 @@ when present, including an authoritative empty list. The adapter always validate
 live catalog, not the discovery snapshot. Project-only selections remain Auto in the runtime
 resolver even when the machine snapshot does not advertise Auto.
 
+## Bundled Auto Mode
+
+Desktop automatically bundles and loads Pi Desktop Auto Mode as a separate native
+extension. Its policy ID is `desktop-auto`, its label is `Auto Mode`, and its native
+command `pi-desktop-policy-desktop-auto` advertises the discovery descriptor through
+`get_commands`. Discovery loads this extension without injecting the MCP bridge.
+
+Loading the extension leaves it passive and inactive. Activation requires one broad
+confirmation covering arbitrary shell commands, file reads and writes, and network
+access with no sandbox. Once active, it adds no per-tool confirmations or blocking
+hook; other extensions' tool hooks and UI requests remain authoritative and are
+never overridden or auto-answered. State is session-local and resets on `session_start`.
+Automatic approvals are not a model autonomous loop or retry mechanism, and are not
+a security sandbox.
+
+Standalone CLI usage, optional installation, and security limits are documented in
+`extensions/pi-desktop-auto-mode/README.md`.
+
 ## Activation protocol
 
 The adapter dispatches a command-only RPC prompt:

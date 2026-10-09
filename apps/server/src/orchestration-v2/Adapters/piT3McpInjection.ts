@@ -4,6 +4,10 @@ import * as FileSystem from "effect/FileSystem";
 
 import type { McpProviderSessionConfig } from "../../mcp/McpProviderSession.ts";
 import {
+  PI_DESKTOP_AUTO_MODE_EXTENSION_FILENAME,
+  PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE,
+} from "./piDesktopAutoModeExtensionSource.ts";
+import {
   PI_T3_MCP_EXTENSION_FILENAME,
   PI_T3_MCP_EXTENSION_SOURCE,
   T3_MCP_BEARER_ENV,
@@ -182,12 +186,38 @@ function hasExplicitExtension(args: ReadonlyArray<string>, extensionPath: string
   const wanted = normalizedPiPath(extensionPath);
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg?.startsWith("--extension=") || arg?.startsWith("-e=")) {
+      if (normalizedPiPath(arg.slice(arg.indexOf("=") + 1)) === wanted) return true;
+      continue;
+    }
     if (arg !== "--extension" && arg !== "-e") continue;
     const configured = args[index + 1];
     if (configured !== undefined && normalizedPiPath(configured) === wanted) return true;
     index += 1;
   }
   return false;
+}
+
+function deduplicateExplicitExtensions(args: ReadonlyArray<string>): ReadonlyArray<string> {
+  const filtered: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === undefined) continue;
+    const paired = arg === "--extension" || arg === "-e";
+    const equals = arg.startsWith("--extension=") || arg.startsWith("-e=");
+    const path = paired ? args[index + 1] : equals ? arg.slice(arg.indexOf("=") + 1) : undefined;
+    if (path === undefined) {
+      filtered.push(arg);
+      continue;
+    }
+    if (paired) index += 1;
+    const normalized = normalizedPiPath(path);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    filtered.push(...(paired ? [arg, path] : [arg]));
+  }
+  return filtered;
 }
 
 function withoutExplicitExtensions(args: ReadonlyArray<string>): ReadonlyArray<string> {
@@ -248,11 +278,25 @@ export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtensio
   return dest;
 });
 
+export const materializePiDesktopAutoModeExtension = Effect.fn(
+  "materializePiDesktopAutoModeExtension",
+)(function* (cacheDir: string) {
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.makeDirectory(cacheDir, { recursive: true });
+  const dest = `${cacheDir.replace(/\\/g, "/")}/${PI_DESKTOP_AUTO_MODE_EXTENSION_FILENAME}`;
+  const existing = yield* fs.readFileString(dest).pipe(Effect.orElseSucceed(() => ""));
+  if (existing !== PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE) {
+    yield* fs.writeFileString(dest, PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE);
+  }
+  return dest;
+});
+
 export function buildPiRpcLaunch(input: {
   readonly launchArgs: ReadonlyArray<string>;
   readonly environment: NodeJS.ProcessEnv;
   readonly mcpSession: McpProviderSessionConfig | undefined;
   readonly extensionPath: string | undefined;
+  readonly autoModeExtensionPath?: string;
   readonly ephemeral?: boolean;
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
@@ -263,12 +307,12 @@ export function buildPiRpcLaunch(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly hasT3Mcp: boolean;
 } {
-  const hasT3Extension = input.disableExtensions !== true && input.extensionPath !== undefined;
+  const disableExtensions = input.disableExtensions === true || input.disableTools === true;
+  const hasT3Extension = !disableExtensions && input.extensionPath !== undefined;
   const hasT3Mcp = hasT3Extension && input.mcpSession !== undefined;
-  const extensionSafeArgs =
-    input.disableExtensions === true
-      ? withoutExplicitExtensions(input.launchArgs)
-      : input.launchArgs;
+  const extensionSafeArgs = disableExtensions
+    ? withoutExplicitExtensions(input.launchArgs)
+    : deduplicateExplicitExtensions(input.launchArgs);
   const launchArgs =
     input.disableTools === true ? withoutToolSelectionArgs(extensionSafeArgs) : extensionSafeArgs;
   const args = [
@@ -278,7 +322,7 @@ export function buildPiRpcLaunch(input: {
     ...launchArgs,
     // Restrictions follow user launch args so a configured --tools or
     // --extension cannot silently re-enable unattended text-generation code.
-    ...(input.disableExtensions === true ? ["--no-extensions"] : []),
+    ...(disableExtensions ? ["--no-extensions"] : []),
     ...(input.disableTools === true ? ["--no-tools"] : []),
   ];
   if (
@@ -287,6 +331,13 @@ export function buildPiRpcLaunch(input: {
     !hasExplicitExtension(args, input.extensionPath)
   ) {
     args.push("--extension", input.extensionPath);
+  }
+  if (
+    !disableExtensions &&
+    input.autoModeExtensionPath !== undefined &&
+    !hasExplicitExtension(args, input.autoModeExtensionPath)
+  ) {
+    args.push("--extension", input.autoModeExtensionPath);
   }
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Pi child reuse

@@ -100,6 +100,7 @@ import {
 import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
+  materializePiDesktopAutoModeExtension,
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
 import {
@@ -437,6 +438,9 @@ export function makePiAdapterV2(
       const extensionPath = yield* provideCacheFs(
         materializePiT3McpExtension(options.serverConfig.providerStatusCacheDir),
       );
+      const autoModeExtensionPath = yield* provideCacheFs(
+        materializePiDesktopAutoModeExtension(options.serverConfig.providerStatusCacheDir),
+      );
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
@@ -447,6 +451,7 @@ export function makePiAdapterV2(
         environment: options.environment,
         mcpSession,
         extensionPath,
+        autoModeExtensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
         policyToken,
       });

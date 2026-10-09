@@ -1,5 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeVM from "node:vm";
+import { PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE } from "./piDesktopAutoModeExtensionSource.ts";
 import {
   CheckpointId,
   EnvironmentId,
@@ -555,6 +557,44 @@ const acknowledgePolicy = (
 };
 
 describe("Pi runtime policy activation", () => {
+  it.effect("activates bundled Auto Mode only from its live descriptor and correlated ACK", () =>
+    Effect.gen(function* () {
+      const commands: PiRpcRecord[] = [];
+      NodeVM.runInNewContext(
+        `(${PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE.replace("export default ", "")})`,
+      )({
+        on: () => {},
+        registerCommand: (name: string, command: { description: string }) =>
+          commands.push({ name, source: "extension", description: command.description }),
+      });
+      const fake = yield* makeFakePi;
+      fake.setPolicyCatalog([guardCommand, ...commands]);
+      const { runtime } = yield* openRuntime(fake);
+      assert.isFalse(
+        fake
+          .allRequests()
+          .some((request) =>
+            String(request["message"]).includes("pi-desktop-policy-desktop-auto activate"),
+          ),
+      );
+      const thread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const starting = yield* startPolicyTurn(
+        runtime,
+        thread,
+        policySelection("desktop-auto"),
+      ).pipe(Effect.forkScoped);
+      const activation = yield* takePolicyPrompt(fake, "pi-desktop-policy-desktop-auto");
+      yield* acknowledgePolicy(fake, activation, true, { requestId: "unrelated" });
+      assert.isFalse(fake.allRequests().some((request) => request["message"] === "Hello pi"));
+      yield* acknowledgePolicy(fake, activation);
+      yield* Fiber.join(starting);
+      yield* takeUserPrompt(fake, "Hello pi");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
   it.effect("requires a correlated positive ACK and preserves plugin confirmation roundtrips", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -1829,6 +1869,14 @@ describe("PiAdapterV2", () => {
       );
       assert.isFalse(spawn.args.includes("--no-extensions"));
       assert.isTrue(extensions.some((path) => path?.endsWith("pi-t3-mcp-extension.ts")));
+      assert.isTrue(
+        extensions.some((path) => path?.endsWith("pi-desktop-auto-mode-extension.mjs")),
+      );
+      const fs = yield* FileSystem.FileSystem;
+      const autoPath = extensions.find((path) =>
+        path?.endsWith("pi-desktop-auto-mode-extension.mjs"),
+      );
+      assert.equal(yield* fs.readFileString(autoPath!), PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE);
       assert.equal(spawn.env.T3_MCP_URL, "http://127.0.0.1:43123/mcp");
       assert.equal(spawn.env.T3_MCP_BEARER_TOKEN, "secret-pi-token");
       assert.equal(spawn.env.T3_PI_RUNTIME_MODE, "full-access");

@@ -1,5 +1,5 @@
 import type { RuntimeMode } from "@t3tools/contracts";
-import { type LucideIcon, LockIcon, LockOpenIcon, PenLineIcon, SparklesIcon } from "lucide-react";
+import { type LucideIcon, LockIcon, LockOpenIcon, PenLineIcon } from "lucide-react";
 
 export const runtimeModeConfig: Record<
   RuntimeMode,
@@ -16,9 +16,9 @@ export const runtimeModeConfig: Record<
     icon: PenLineIcon,
   },
   auto: {
-    label: "Auto",
-    description: "Supported providers approve routine actions; others still ask.",
-    icon: SparklesIcon,
+    label: "Unavailable mode · auto",
+    description: "This legacy access mode is unavailable. Select an access policy explicitly.",
+    icon: LockIcon,
   },
   "full-access": {
     label: "Full access",
@@ -27,4 +27,6 @@ export const runtimeModeConfig: Record<
   },
 };
 
-export const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
+export const runtimeModeOptions = (Object.keys(runtimeModeConfig) as RuntimeMode[]).filter(
+  (mode) => mode !== "auto",
+);

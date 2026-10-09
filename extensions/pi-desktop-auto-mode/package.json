@@ -1,0 +1,16 @@
+{
+  "name": "pi-desktop-auto-mode",
+  "version": "1.0.0",
+  "description": "Opt-in, session-local automatic tool approvals for Pi Desktop.",
+  "files": [
+    "index.mjs",
+    "index.d.mts",
+    "README.md"
+  ],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  }
+}

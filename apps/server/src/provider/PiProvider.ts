@@ -15,10 +15,12 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
@@ -28,8 +30,10 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   buildPiRpcLaunch,
+  materializePiDesktopAutoModeExtension,
   resolvePiLaunchArgs,
 } from "../orchestration-v2/Adapters/piT3McpInjection.ts";
+import * as ServerConfig from "../config.ts";
 import {
   makePiRpcConnection,
   PiRpcError,
@@ -134,11 +138,35 @@ const makePiDiscoveryConnection = Effect.fnUntraced(function* (
   launchArgs: ReadonlyArray<string>,
   cwd?: string,
 ) {
+  const optionalFs = yield* Effect.serviceOption(FileSystem.FileSystem);
+  const optionalConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+  const materialize = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const cacheDir =
+      Option.isSome(optionalFs) && Option.isSome(optionalConfig)
+        ? optionalConfig.value.providerStatusCacheDir
+        : yield* fs.makeTempDirectoryScoped({ prefix: "pi-desktop-discovery-" });
+    return yield* materializePiDesktopAutoModeExtension(cacheDir);
+  });
+  const autoModeExtensionPath = yield* materialize.pipe(
+    Option.isSome(optionalFs)
+      ? Effect.provideService(FileSystem.FileSystem, optionalFs.value)
+      : Effect.provide(NodeFileSystem.layer),
+    Effect.mapError(
+      (cause) =>
+        new PiRpcError({
+          operation: "launch",
+          detail: "Could not materialize Pi Auto Mode extension.",
+          cause,
+        }),
+    ),
+  );
   const launch = buildPiRpcLaunch({
     launchArgs,
     environment,
     mcpSession: undefined,
     extensionPath: undefined,
+    autoModeExtensionPath,
     ephemeral: true,
   });
   const connection = yield* makePiRpcConnection({

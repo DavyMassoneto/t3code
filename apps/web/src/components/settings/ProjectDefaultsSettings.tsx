@@ -297,7 +297,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
               <Select
                 value={mixedPermissions ? null : settings.defaultRuntimeMode}
                 onValueChange={(value) => {
-                  if (value) updateSettings({ defaultRuntimeMode: value });
+                  if (value && value !== "auto") updateSettings({ defaultRuntimeMode: value });
                 }}
               >
                 <SelectTrigger size="sm" aria-label="Default permissions">
@@ -311,6 +311,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {!mixedPermissions && settings.defaultRuntimeMode === "auto" && (
+                    <SelectItem value="auto" disabled>
+                      {runtimeModeConfig.auto.label}
+                    </SelectItem>
+                  )}
                   {runtimeModeOptions.map((mode) => {
                     const option = runtimeModeConfig[mode];
                     const Icon = option.icon;

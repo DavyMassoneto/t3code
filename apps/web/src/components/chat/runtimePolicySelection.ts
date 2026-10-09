@@ -43,9 +43,7 @@ export function resolveRuntimePolicyPicker(
     sameInstance && provider?.driver === "pi" ? runtimePoliciesForCwd(provider, cwd) : [];
   const supported = provider?.supportedRuntimeModes;
   const choices: RuntimePolicyChoice[] = runtimeModeOptions
-    .filter(
-      (candidate) => candidate !== "auto" && (!supported?.length || supported.includes(candidate)),
-    )
+    .filter((candidate) => !supported?.length || supported.includes(candidate))
     .map((candidate) => ({ value: candidate, ...runtimeModeConfig[candidate] }));
   for (const policy of policies) {
     choices.push({

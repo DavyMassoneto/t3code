@@ -6,6 +6,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
+import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
 import {
   carryRuntimePolicyForModelChange,
   resolveMultiModelRuntimePolicySelection,
@@ -42,6 +43,64 @@ const provider = Schema.decodeSync(ServerProvider)({
 });
 
 describe("runtime policy selection", () => {
+  it("excludes generic auto from shared built-ins while selecting bundled Auto Mode through its named policy", () => {
+    expect(runtimeModeOptions).toEqual(["approval-required", "auto-accept-edits", "full-access"]);
+    const desktopProvider = {
+      ...provider,
+      supportedRuntimeModes: [...provider.supportedRuntimeModes!, "auto" as const],
+      runtimePolicies: [
+        ...policies,
+        {
+          id: "desktop-auto",
+          label: "Auto Mode",
+          extensionName: "Pi Desktop Auto Mode",
+          command: "pi-desktop-policy-desktop-auto",
+        },
+      ],
+    };
+    const picker = resolveRuntimePolicyPicker(desktopProvider, "approval-required", selection);
+    expect(picker.choices.map((choice) => choice.value)).toEqual([
+      ...runtimeModeOptions,
+      "policy:auto",
+      "policy:review",
+      "policy:desktop-auto",
+    ]);
+    expect(picker.choices.filter((choice) => choice.label.startsWith("Auto Mode"))).toEqual([
+      expect.objectContaining({
+        value: "policy:desktop-auto",
+        label: "Auto Mode · Pi Desktop Auto Mode",
+      }),
+    ]);
+    const next = selectRuntimePolicyChoice(desktopProvider, selection, "policy:desktop-auto")!;
+    expect(next.runtimeMode).toBe("auto");
+    expect(next.modelSelection.options).toEqual([
+      ...selection.options!,
+      { id: PI_RUNTIME_POLICY_OPTION_ID, value: "desktop-auto" },
+    ]);
+    expect(
+      resolveRuntimePolicyPicker(desktopProvider, next.runtimeMode, next.modelSelection),
+    ).toMatchObject({ value: "policy:desktop-auto", blockedReason: null });
+    expect(selectRuntimePolicyChoice(desktopProvider, selection, "auto")).toBeNull();
+  });
+
+  it("keeps legacy auto unavailable until a built-in or named policy is explicitly selected", () => {
+    expect(runtimeModeConfig.auto.label).toBe("Unavailable mode · auto");
+    const legacy = resolveRuntimePolicyPicker(provider, "auto", selection);
+    expect(legacy.value).toBe("unavailable");
+    expect(legacy.blockedReason).not.toBeNull();
+    expect(legacy.choices.at(-1)).toMatchObject({
+      label: runtimeModeConfig.auto.label,
+      disabled: true,
+    });
+    expect(selectRuntimePolicyChoice(provider, selection, legacy.value)).toBeNull();
+    expect(selection.options).toEqual([{ id: "thinkingLevel", value: "high" }]);
+    const next = selectRuntimePolicyChoice(provider, selection, "auto-accept-edits")!;
+    expect(next).toEqual({ runtimeMode: "auto-accept-edits", modelSelection: selection });
+    expect(
+      resolveRuntimePolicyPicker(provider, next.runtimeMode, next.modelSelection),
+    ).toMatchObject({ value: "auto-accept-edits", blockedReason: null });
+  });
+
   it("applies policy to every model of the same instance, retains each effort, and blocks cross-instance auto sends", () => {
     const primary = selectRuntimePolicyChoice(provider, selection, "policy:review")!.modelSelection;
     const second = createModelSelection(instanceId, "another/model", [
