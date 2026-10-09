@@ -6,68 +6,49 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 
 import { PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE } from "../src/orchestration-v2/Adapters/piDesktopAutoModeExtensionSource.ts";
 
 type RecordValue = Record<string, unknown>;
+type Step = {
+  tool: "read" | "write";
+  path: string;
+  review?: string | undefined;
+  unavailable?: boolean;
+  confirm?: boolean;
+  executes: boolean;
+  resultText: string | RegExp;
+};
 type Scenario = {
   name: string;
-  tool: "read" | "write";
-  review: string;
-  confirm: boolean;
-  executes: boolean;
+  prompt: string;
+  steps: readonly Step[];
+  originalTask?: string;
+  aborts?: boolean;
+  notifications?: number;
+  inactive?: boolean;
 };
 
 const timeoutMs = 20_000;
 const finalText = "The local smoke scenario is complete.";
 const fixtureText = "Owned Auto Mode smoke read fixture.\n";
 const markerText = "Owned Auto Mode smoke write marker.\n";
-const scenarios: readonly Scenario[] = [
-  {
-    name: "approve-read",
-    tool: "read",
-    review: '{"decision":"approve","risk":"low","reason":"Owned fixture read."}',
-    confirm: false,
-    executes: true,
-  },
-  {
-    name: "approve-write",
-    tool: "write",
-    review: '{"decision":"approve","risk":"low","reason":"Owned temporary marker."}',
-    confirm: false,
-    executes: true,
-  },
-  {
-    name: "ask",
-    tool: "write",
-    review: '{"decision":"ask","risk":"medium","reason":"Request confirmation."}',
-    confirm: true,
-    executes: false,
-  },
-  {
-    name: "high",
-    tool: "write",
-    review: '{"decision":"approve","risk":"high","reason":"High risk requires confirmation."}',
-    confirm: true,
-    executes: false,
-  },
-  {
-    name: "deny",
-    tool: "write",
-    review: '{"decision":"deny","risk":"high","reason":"Block this action."}',
-    confirm: false,
-    executes: false,
-  },
-  {
-    name: "invalid-json",
-    tool: "write",
-    review: "not a JSON review",
-    confirm: true,
-    executes: false,
-  },
-];
+
+function toolText(result: RecordValue) {
+  const content = result.content;
+  NodeAssert.ok(Array.isArray(content));
+  return content.map((part) => record(part).text ?? "").join("\n");
+}
+
+function assertStepResult(result: RecordValue, step: Step, label: string) {
+  NodeAssert.equal(result.isError, !step.executes, `${label}: native tool outcome`);
+  const text = toolText(record(result.result));
+  if (typeof step.resultText === "string") NodeAssert.ok(text.includes(step.resultText), text);
+  else NodeAssert.match(text, step.resultText);
+}
 
 function record(value: unknown): RecordValue {
   NodeAssert.ok(
@@ -260,12 +241,20 @@ export async function runAutoModeSmoke() {
   const smokeRoot = NodePath.join(repository, ".t3", "pi-auto-mode-smoke");
   await NodeFSP.mkdir(smokeRoot, { recursive: true });
   const root = await NodeFSP.realpath(smokeRoot);
+  const repositoryRoot = await NodeFSP.realpath(repository);
+  const rootRelative = NodePath.relative(repositoryRoot, root);
+  NodeAssert.ok(
+    rootRelative &&
+      !NodePath.isAbsolute(rootRelative) &&
+      rootRelative !== ".." &&
+      !rootRelative.startsWith(`..${NodePath.sep}`),
+    "Smoke root must remain inside the repository",
+  );
   const workspace = await NodeFSP.mkdtemp(NodePath.join(root, "run-"));
+  const taskDirectory = NodePath.join(workspace, "task");
   const agentDirectory = NodePath.join(workspace, "agent");
   let rpc: NativeRpc | undefined;
-  let current:
-    | { scenario: Scenario; path: string; agentRequests: number; reviewRequests: number }
-    | undefined;
+  let current: { scenario: Scenario; agentRequests: number; reviewRequests: number } | undefined;
   const requests: { scenario: string; kind: string }[] = [];
   let serverFailure: Error | undefined;
   const server = NodeHttp.createServer((request, response) => {
@@ -286,47 +275,122 @@ export async function runAutoModeSmoke() {
       const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
       requests.push({ scenario: current.scenario.name, kind: hasTools ? "agent" : "review" });
       if (!hasTools) {
-        NodeAssert.equal(current.agentRequests, 1, "Review must follow the tool call");
-        NodeAssert.equal(++current.reviewRequests, 1, "Exactly one native reviewer request");
-        const reviewPrompt = JSON.stringify(body.messages);
+        const step = current.scenario.steps[current.agentRequests - 1];
         NodeAssert.ok(
-          reviewPrompt.includes(current.scenario.tool),
-          "Reviewer did not receive the tool",
+          step && (step.review !== undefined || step.unavailable),
+          "Unexpected reviewer call for routine builtin",
         );
-        const escapedPath = JSON.stringify(current.path).slice(1, -1);
+        current.reviewRequests++;
+        const reviewPrompt = JSON.stringify(body.messages);
+        NodeAssert.ok(reviewPrompt.includes(step.tool), "Reviewer did not receive the tool");
+        const escapedPath = JSON.stringify(step.path).slice(1, -1);
         NodeAssert.ok(
           reviewPrompt.includes(escapedPath) ||
             reviewPrompt.includes(JSON.stringify(escapedPath).slice(1, -1)),
           "Reviewer did not receive the owned path",
         );
-        sendSse(response, { content: current.scenario.review }, "stop");
+        const reviewMessages = (body.messages as unknown[]).map(record);
+        const payloadMessage = reviewMessages.findLast((message) => message.role === "user");
+        NodeAssert.ok(payloadMessage && typeof payloadMessage.content === "string");
+        const payload = record(JSON.parse(payloadMessage.content));
+        const actualUserMessages = payload.actualUserMessages;
+        NodeAssert.ok(
+          Array.isArray(actualUserMessages),
+          "Reviewer must receive actual user messages",
+        );
+        const actualUserTexts = new Set(
+          actualUserMessages.map((message) => {
+            const userMessage = record(message);
+            NodeAssert.equal(userMessage.role, "user");
+            NodeAssert.equal(typeof userMessage.text, "string");
+            return userMessage.text;
+          }),
+        );
+        NodeAssert.ok(
+          actualUserTexts.has(current.scenario.prompt),
+          "Reviewer lost latest user message",
+        );
+        if (current.scenario.originalTask) {
+          NodeAssert.ok(
+            actualUserTexts.has(current.scenario.originalTask),
+            "Continue lost original user task",
+          );
+          NodeAssert.equal(current.scenario.prompt, "continue");
+        }
+        NodeAssert.equal(payload.toolName, step.tool);
+        NodeAssert.equal(record(payload.input).path, step.path);
+        NodeAssert.equal(payload.cwd, taskDirectory);
+        if (step.unavailable) {
+          response.writeHead(404, { "Content-Type": "application/json" });
+          response.end(
+            JSON.stringify({
+              error: {
+                message: "Owned reviewer deliberately unavailable",
+                type: "invalid_request_error",
+                code: "model_not_found",
+              },
+            }),
+          );
+        } else sendSse(response, { content: step.review }, "stop");
         return;
       }
       const tools = (body.tools as unknown[]).map((tool) => record(record(tool).function).name);
+      const systemMessage = (body.messages as unknown[])
+        .map(record)
+        .find((message) => message.role === "system");
+      NodeAssert.ok(systemMessage && typeof systemMessage.content === "string");
+      NodeAssert.equal(
+        systemMessage.content.includes("<desktop_auto_mode>"),
+        !current.scenario.inactive,
+        "Autonomy guidance must be active-only",
+      );
       NodeAssert.ok(
         tools.includes("read") && tools.includes("write"),
         "Native builtin tools missing",
       );
       NodeAssert.equal(tools.length, 2, "Only owned read/write tools may be enabled");
-      NodeAssert.ok(++current.agentRequests <= 2, "Unexpected autonomous loop");
-      if (current.agentRequests === 2) {
-        NodeAssert.equal(current.reviewRequests, 1, "Final response preceded native review");
+      NodeAssert.ok(
+        ++current.agentRequests <= current.scenario.steps.length + 1,
+        "Unexpected autonomous loop",
+      );
+      const stepIndex = current.agentRequests - 1;
+      if (stepIndex > 0) {
+        const previousStep = current.scenario.steps[stepIndex - 1]!;
+        const toolResults = (body.messages as unknown[])
+          .map(record)
+          .filter((message) => message.role === "tool");
+        const previousCallId = `call-${current.scenario.name}-${stepIndex - 1}`;
+        const previousResult = toolResults.find(
+          (message) => message.tool_call_id === previousCallId,
+        );
+        NodeAssert.ok(
+          previousResult && typeof previousResult.content === "string",
+          "Agent did not receive previous native tool result",
+        );
+        if (typeof previousStep.resultText === "string")
+          NodeAssert.ok(
+            previousResult.content.includes(previousStep.resultText),
+            previousResult.content,
+          );
+        else NodeAssert.match(previousResult.content, previousStep.resultText);
+      }
+      if (stepIndex === current.scenario.steps.length) {
+        NodeAssert.ok(!current.scenario.aborts, "Denial breaker did not abort the native loop");
         sendSse(response, { content: finalText }, "stop");
         return;
       }
+      const step = current.scenario.steps[stepIndex]!;
       const args =
-        current.scenario.tool === "read"
-          ? { path: current.path }
-          : { path: current.path, content: markerText };
+        step.tool === "read" ? { path: step.path } : { path: step.path, content: markerText };
       sendSse(
         response,
         {
           tool_calls: [
             {
               index: 0,
-              id: `call-${current.scenario.name}`,
+              id: `call-${current.scenario.name}-${stepIndex}`,
               type: "function",
-              function: { name: current.scenario.tool, arguments: JSON.stringify(args) },
+              function: { name: step.tool, arguments: JSON.stringify(args) },
             },
           ],
         },
@@ -346,6 +410,7 @@ export async function runAutoModeSmoke() {
   });
   try {
     await NodeFSP.mkdir(agentDirectory);
+    await NodeFSP.mkdir(taskDirectory);
     for (const directory of ["tmp", "appdata", "localappdata", "config", "cache"])
       await NodeFSP.mkdir(NodePath.join(workspace, directory));
     await NodeFSP.writeFile(NodePath.join(agentDirectory, "auth.json"), "{}\n");
@@ -379,7 +444,8 @@ export async function runAutoModeSmoke() {
       }),
     );
     const environment = isolatedEnvironment(workspace, agentDirectory);
-    const command = process.env.PI_BINARY_PATH || "pi";
+    const platform = await Effect.runPromise(HostProcessPlatform);
+    const command = process.env.PI_BINARY_PATH || (platform === "win32" ? "pi.exe" : "pi");
     const args = [
       "--mode",
       "rpc",
@@ -403,9 +469,14 @@ export async function runAutoModeSmoke() {
     const launch = await Effect.runPromise(
       resolveSpawnCommand(command, args, { env: environment }),
     );
+    NodeAssert.equal(
+      launch.shell,
+      false,
+      "Use a native Pi executable for captured-process cleanup, not a shell wrapper",
+    );
     rpc = new NativeRpc(
       NodeChildProcess.spawn(launch.command, [...launch.args], {
-        cwd: workspace,
+        cwd: taskDirectory,
         env: environment,
         shell: launch.shell,
         windowsHide: true,
@@ -461,18 +532,199 @@ export async function runAutoModeSmoke() {
     );
     NodeAssert.equal(requests.length, 0, "Activation must not call the model");
 
+    const inputPath = NodePath.join(taskDirectory, "input.txt");
+    const outputPath = NodePath.join(taskDirectory, "output.txt");
+    const continuedPath = NodePath.join(workspace, "continued-marker.txt");
+    const boundaryReadPath = NodePath.join(workspace, "boundary-read.txt");
+    await NodeFSP.writeFile(inputPath, fixtureText);
+    await NodeFSP.writeFile(boundaryReadPath, fixtureText);
+    const originalTask = `Read ${inputPath}, write exactly ${JSON.stringify(markerText)} to ${outputPath}, then read it back to verify. When I say continue, write the same marker to the owned scratch file ${continuedPath} outside the task cwd.`;
+    const safeRead: Step = {
+      tool: "read",
+      path: inputPath,
+      executes: true,
+      resultText: fixtureText.trim(),
+    };
+    const blockedWrite = (name: string, review: string, confirm = false): Step => ({
+      tool: "write",
+      path: NodePath.join(workspace, `${name}.txt`),
+      review,
+      confirm,
+      executes: false,
+      resultText: confirm
+        ? /Auto Mode: tool approval declined/
+        : /Auto Mode: review unavailable or invalid.*materially safer alternative/s,
+    });
+    const denied = (name: string): Step => ({
+      ...blockedWrite(
+        name,
+        '{"decision":"deny","risk":"high","reason":"Do not write this marker. Use read on the task input instead."}',
+      ),
+      resultText: /Auto Mode: denied.*Use read/s,
+    });
+    const scenarios: readonly Scenario[] = [
+      {
+        name: "native-read-write-read",
+        prompt: originalTask,
+        steps: [
+          safeRead,
+          { tool: "write", path: outputPath, executes: true, resultText: "Successfully wrote" },
+          { tool: "read", path: outputPath, executes: true, resultText: markerText.trim() },
+        ],
+      },
+      {
+        name: "continue-medium-boundary-write",
+        prompt: "continue",
+        originalTask,
+        steps: [
+          {
+            tool: "write",
+            path: continuedPath,
+            review:
+              '{"decision":"approve","risk":"medium","reason":"Original user task authorizes this owned scratch marker."}',
+            executes: true,
+            resultText: "Successfully wrote",
+          },
+        ],
+      },
+      {
+        name: "low-boundary-read",
+        prompt: `Read the owned scratch fixture ${boundaryReadPath} outside cwd.`,
+        steps: [
+          {
+            tool: "read",
+            path: boundaryReadPath,
+            review: '{"decision":"approve","risk":"low","reason":"Harmless owned fixture read."}',
+            executes: true,
+            resultText: fixtureText.trim(),
+          },
+        ],
+      },
+      {
+        name: "deny-then-safe-read",
+        prompt: `Do not write ${NodePath.join(workspace, "denied-marker.txt")}. Read ${inputPath} instead and finish.`,
+        steps: [denied("denied-marker"), safeRead],
+      },
+      {
+        name: "ask-declined",
+        prompt:
+          "Check an owned scratch write with explicit approval, then finish without writing if declined.",
+        steps: [
+          blockedWrite(
+            "ask-marker",
+            '{"decision":"ask","risk":"medium","reason":"Ask the user before this owned scratch write."}',
+            true,
+          ),
+        ],
+      },
+      {
+        name: "high-declined",
+        prompt:
+          "Check a high-risk owned scratch write with explicit approval, then finish without writing if declined.",
+        steps: [
+          blockedWrite(
+            "high-marker",
+            '{"decision":"approve","risk":"high","reason":"High risk requires user approval."}',
+            true,
+          ),
+        ],
+      },
+      {
+        name: "invalid-json-no-confirmation",
+        notifications: 1,
+        prompt:
+          "If review is invalid, do not write the scratch marker; use a safe read and finish.",
+        steps: [
+          blockedWrite("invalid-json-marker", "not a JSON review"),
+          blockedWrite("invalid-json-marker-two", "still not a JSON review"),
+          safeRead,
+        ],
+      },
+      {
+        name: "invalid-shape-no-confirmation",
+        notifications: 1,
+        prompt:
+          "If the reviewer response has unexpected fields, do not write; use a safe read and finish.",
+        steps: [
+          blockedWrite(
+            "invalid-shape-marker",
+            '{"decision":"approve","risk":"low","reason":"Bad schema","extra":true}',
+          ),
+          safeRead,
+        ],
+      },
+      {
+        name: "unavailable-review-no-confirmation",
+        notifications: 1,
+        prompt:
+          "If review is unavailable, do not write the scratch marker; use a safe read and finish.",
+        steps: [
+          { ...blockedWrite("unavailable-marker", ""), review: undefined, unavailable: true },
+          safeRead,
+        ],
+      },
+      {
+        name: "native-denial-breaker",
+        notifications: 1,
+        prompt: `Never write scratch markers. Stop after repeated denials and wait for a new user task. The safe alternative is read ${inputPath}.`,
+        steps: [
+          denied("breaker-one"),
+          denied("breaker-two"),
+          { ...denied("breaker-three"), resultText: /^Operation aborted$/ },
+        ],
+        aborts: true,
+      },
+      {
+        name: "native-abort-recovery",
+        prompt: `After the stopped turn, read ${inputPath} and finish this new user task.`,
+        steps: [safeRead],
+      },
+      {
+        name: "inactive-native-task",
+        prompt: "After turning Auto Mode off, write only the owned scratch marker and finish.",
+        inactive: true,
+        steps: [
+          {
+            tool: "write",
+            path: NodePath.join(workspace, "inactive-marker.txt"),
+            executes: true,
+            resultText: "Successfully wrote",
+          },
+        ],
+      },
+    ];
     for (const scenario of scenarios) {
-      const path = NodePath.join(workspace, `${scenario.name}.txt`);
-      if (scenario.tool === "read") await NodeFSP.writeFile(path, fixtureText);
-      else await absent(path);
-      current = { scenario, path, agentRequests: 0, reviewRequests: 0 };
+      if (scenario.inactive) {
+        const deactivationStart = native.events.length;
+        await native.request({
+          type: "prompt",
+          message: "/pi-desktop-policy-desktop-auto deactivate smoke-deactivation",
+        });
+        const deactivationAck = await native.wait(
+          (event) =>
+            event.type === "extension_ui_request" &&
+            event.method === "notify" &&
+            typeof event.message === "string" &&
+            event.message.startsWith("PI_DESKTOP_POLICY_ACK:"),
+          deactivationStart,
+          "Auto Mode deactivation acknowledgement",
+        );
+        NodeAssert.deepEqual(
+          JSON.parse(String(deactivationAck.message).slice("PI_DESKTOP_POLICY_ACK:".length)),
+          {
+            requestId: "smoke-deactivation",
+            policyId: "desktop-auto",
+            action: "deactivate",
+            success: true,
+          },
+        );
+      }
+      for (const step of scenario.steps) if (step.tool === "write") await absent(step.path);
+      current = { scenario, agentRequests: 0, reviewRequests: 0 };
       const start = native.events.length;
       await native.request({
         type: "prompt",
-        message:
-          scenario.tool === "read"
-            ? `Read the owned fixture at ${path}.`
-            : `Write exactly ${JSON.stringify(markerText)} to the owned temporary file at ${path}.`,
+        message: scenario.prompt,
       });
       let cursor = start;
       let confirmations = 0;
@@ -486,73 +738,124 @@ export async function runAutoModeSmoke() {
         );
         cursor = native.events.indexOf(event) + 1;
         if (event.type === "agent_end") break;
-        NodeAssert.ok(scenario.confirm, `${scenario.name}: unexpected confirmation`);
+        const confirmationStep = scenario.steps[current.agentRequests - 1];
+        NodeAssert.ok(confirmationStep?.confirm, `${scenario.name}: unexpected confirmation`);
         NodeAssert.equal(++confirmations, 1, `${scenario.name}: duplicate confirmation`);
         NodeAssert.equal(event.title, "Auto Mode: approve tool?");
         NodeAssert.equal(typeof event.id, "string");
         const confirmationText = String(event.message);
         NodeAssert.ok(
-          confirmationText.includes(path) ||
-            confirmationText.includes(JSON.stringify(path).slice(1, -1)),
+          confirmationText.includes(confirmationStep.path) ||
+            confirmationText.includes(JSON.stringify(confirmationStep.path).slice(1, -1)),
           "Confirmation must identify the owned action",
         );
         native.send({ type: "extension_ui_response", id: event.id, confirmed: false });
       }
       NodeAssert.equal(
         confirmations,
-        scenario.confirm ? 1 : 0,
+        scenario.steps.filter((step) => step.confirm).length,
         `${scenario.name}: confirmation count`,
       );
-      NodeAssert.equal(current.agentRequests, 2, `${scenario.name}: agent request count`);
-      NodeAssert.equal(current.reviewRequests, 1, `${scenario.name}: reviewer request count`);
+      NodeAssert.equal(
+        current.agentRequests,
+        scenario.steps.length + (scenario.aborts ? 0 : 1),
+        `${scenario.name}: agent request count`,
+      );
+      NodeAssert.equal(
+        current.reviewRequests,
+        scenario.steps.filter((step) => step.review !== undefined || step.unavailable).length,
+        `${scenario.name}: reviewer request count`,
+      );
+      if (scenario.aborts) {
+        const turnEvents = native.events.slice(start);
+        NodeAssert.equal(
+          turnEvents.filter((event) => event.type === "agent_end").length,
+          1,
+          `${scenario.name}: native turn must end once`,
+        );
+        const stopWarnings = turnEvents.filter(
+          (event) =>
+            event.type === "extension_ui_request" &&
+            event.method === "notify" &&
+            typeof event.message === "string" &&
+            event.message.startsWith("Auto Mode stopped this turn after repeated denials"),
+        );
+        NodeAssert.equal(stopWarnings.length, 1, `${scenario.name}: visible stop warning missing`);
+        NodeAssert.equal(
+          stopWarnings[0]!.notifyType,
+          "warning",
+          `${scenario.name}: stop notification must be a warning`,
+        );
+      }
       const results = native.events
         .slice(start)
         .filter((event) => event.type === "tool_execution_end");
-      NodeAssert.equal(results.length, 1, `${scenario.name}: native tool result count`);
-      const result = results[0]!;
-      NodeAssert.equal(result.toolName, scenario.tool);
-      NodeAssert.equal(result.toolCallId, `call-${scenario.name}`);
-      NodeAssert.equal(result.isError, !scenario.executes, `${scenario.name}: native tool outcome`);
-      const content = record(result.result).content;
-      NodeAssert.ok(Array.isArray(content));
-      const text = content.map((part) => record(part).text ?? "").join("\n");
-      if (scenario.executes && scenario.tool === "read")
-        NodeAssert.ok(text.includes(fixtureText.trim()));
-      else if (scenario.executes) NodeAssert.ok(text.includes("Successfully wrote"));
-      else
-        NodeAssert.match(
-          text,
-          scenario.name === "deny" ? /Auto Mode: denied/ : /Auto Mode: tool approval declined/,
-        );
-      if (scenario.tool === "read")
-        NodeAssert.equal(await NodeFSP.readFile(path, "utf8"), fixtureText);
-      else if (scenario.executes)
-        NodeAssert.equal(await NodeFSP.readFile(path, "utf8"), markerText);
-      else await absent(path);
+      NodeAssert.equal(
+        results.length,
+        scenario.steps.length,
+        `${scenario.name}: native tool result count`,
+      );
       const messages = record(await native.request({ type: "get_messages" })).messages;
       NodeAssert.ok(Array.isArray(messages));
-      const toolResults = messages
-        .map(record)
-        .filter(
-          (message) =>
-            message.role === "toolResult" && message.toolCallId === `call-${scenario.name}`,
-        );
-      NodeAssert.equal(toolResults.length, 1, `${scenario.name}: persisted native tool result`);
-      NodeAssert.equal(toolResults[0]!.isError, !scenario.executes);
+      for (const [stepIndex, step] of scenario.steps.entries()) {
+        const result = results[stepIndex]!;
+        const callId = `call-${scenario.name}-${stepIndex}`;
+        NodeAssert.equal(result.toolName, step.tool);
+        NodeAssert.equal(result.toolCallId, callId);
+        assertStepResult(result, step, `${scenario.name}/${stepIndex}`);
+        const toolResults: RecordValue[] = messages
+          .map(record)
+          .filter((message) => message.role === "toolResult" && message.toolCallId === callId);
+        NodeAssert.equal(toolResults.length, 1, `${scenario.name}: persisted native tool result`);
+        NodeAssert.equal(toolResults[0]!.isError, !step.executes);
+        if (step.tool === "write") {
+          if (step.executes)
+            NodeAssert.equal(await NodeFSP.readFile(step.path, "utf8"), markerText);
+          else await absent(step.path);
+        } else
+          NodeAssert.equal(
+            await NodeFSP.readFile(step.path, "utf8"),
+            step.path === outputPath ? markerText : fixtureText,
+          );
+      }
       const finalMessage = record(messages.at(-1));
-      NodeAssert.ok(
-        finalMessage.role === "assistant" &&
-          Array.isArray(finalMessage.content) &&
-          finalMessage.content.some((part) => record(part).text === finalText),
-        `${scenario.name}: final assistant response missing`,
+      if (!scenario.aborts)
+        NodeAssert.ok(
+          finalMessage.role === "assistant" &&
+            Array.isArray(finalMessage.content) &&
+            finalMessage.content.some((part) => record(part).text === finalText),
+          `${scenario.name}: final assistant response missing`,
+        );
+      NodeAssert.equal(
+        record(await native.request({ type: "get_state" })).isStreaming,
+        false,
+        `${scenario.name}: native loop must be idle`,
+      );
+      NodeAssert.equal(
+        native.events
+          .slice(start)
+          .filter((event) => event.type === "extension_ui_request" && event.method === "notify")
+          .length,
+        scenario.notifications ?? 0,
+        `${scenario.name}: unexpected user notification spam`,
       );
       console.log(
-        `PASS ${scenario.name}: ${scenario.executes ? "executed" : "blocked"}; confirmations=${confirmations}`,
+        `PASS ${scenario.name}: steps=${scenario.steps.length}; reviews=${current.reviewRequests}; confirmations=${confirmations}${scenario.aborts ? "; native loop aborted" : "; task completed"}`,
       );
       current = undefined;
     }
     NodeAssert.equal(serverFailure, undefined);
-    NodeAssert.equal(requests.length, scenarios.length * 3);
+    NodeAssert.equal(
+      requests.length,
+      scenarios.reduce(
+        (total, scenario) =>
+          total +
+          scenario.steps.length +
+          (scenario.aborts ? 0 : 1) +
+          scenario.steps.filter((step) => step.review !== undefined || step.unavailable).length,
+        0,
+      ),
+    );
     console.log(
       `PASS ${scenarios.length} scenarios; ${requests.length} owned loopback requests; no paid calls`,
     );

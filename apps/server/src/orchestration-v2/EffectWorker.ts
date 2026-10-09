@@ -502,6 +502,14 @@ export class OrchestrationEffectWorkerError extends Schema.TaggedError<Orchestra
 const isOrchestrationEffectWorkerError = Schema.is(OrchestrationEffectWorkerError);
 
 export interface OrchestrationEffectWorkerV2Shape {
+  readonly runtimeResponses?: {
+    readonly awaitWork: Effect.Effect<void>;
+    readonly runOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
+    readonly nextClaimableAt: Effect.Effect<
+      Option.Option<DateTime.Utc>,
+      OrchestrationEffectWorkerError
+    >;
+  };
   readonly awaitWork: Effect.Effect<void>;
   readonly runOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
   readonly runRecoveryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
@@ -628,10 +636,15 @@ export const layerWithOptions = (
           ? requeueClaim(effect, cause)
           : terminalizeClaim(effect, cause);
 
-      const runOnce = (excludeRestartContinuations = false) =>
+      const runOnce = (excludeRestartContinuations = false, onlyRuntimeResponses = false) =>
         Effect.gen(function* () {
           const claimExit = yield* Effect.exit(
-            outbox.claimNext({ workerId, leaseDurationMs, excludeRestartContinuations }),
+            outbox.claimNext({
+              workerId,
+              leaseDurationMs,
+              excludeRestartContinuations,
+              onlyRuntimeResponses,
+            }),
           );
           yield* increment(orchestrationEffectClaimsTotal, {
             result: Exit.isFailure(claimExit)
@@ -747,6 +760,23 @@ export const layerWithOptions = (
         );
 
       return OrchestrationEffectWorkerV2.of({
+        ...(outbox.runtimeResponses?.nextClaimableAt === undefined
+          ? {}
+          : {
+              runtimeResponses: {
+                awaitWork: outbox.runtimeResponses.awaitAvailable,
+                runOnce: runOnce(false, true),
+                nextClaimableAt: outbox.runtimeResponses.nextClaimableAt.pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationEffectWorkerError({
+                        operation: "next-response-claimable",
+                        cause,
+                      }),
+                  ),
+                ),
+              },
+            }),
         awaitWork: outbox.awaitAvailable,
         runOnce: runOnce(),
         runRecoveryOnce: runOnce(true),
@@ -797,53 +827,61 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
       // Post-commit notifications are the low-latency path. `availableAt` is the
       // durable retry schedule, and the long liveness poll only recovers from a
       // missed in-process notification or work inserted by another process.
-      const runWorker = Effect.gen(function* () {
-        while (true) {
-          const outcome = yield* worker.runOnce.pipe(
-            Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Orchestration effect worker failed", cause).pipe(
-                Effect.as("failed" as const),
+      const runWorker = (
+        lane: Pick<OrchestrationEffectWorkerV2Shape, "runOnce" | "nextClaimableAt" | "awaitWork">,
+      ) =>
+        Effect.gen(function* () {
+          while (true) {
+            const outcome = yield* lane.runOnce.pipe(
+              Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Orchestration effect worker failed", cause).pipe(
+                  Effect.as("failed" as const),
+                ),
               ),
-            ),
-          );
-          if (outcome === "worked") {
-            yield* Effect.yieldNow;
-            continue;
-          }
-          if (outcome === "failed") {
-            // A due row can remain visible when a claim UPDATE fails. Do not
-            // feed that past deadline back into the scheduler and retry at the
-            // one-millisecond floor; let transient database failures cool off.
-            yield* Effect.sleep(Duration.millis(Math.min(1_000, livenessPollIntervalMs)));
-            continue;
-          }
+            );
+            if (outcome === "worked") {
+              yield* Effect.yieldNow;
+              continue;
+            }
+            if (outcome === "failed") {
+              // A due row can remain visible when a claim UPDATE fails. Do not
+              // feed that past deadline back into the scheduler and retry at the
+              // one-millisecond floor; let transient database failures cool off.
+              yield* Effect.sleep(Duration.millis(Math.min(1_000, livenessPollIntervalMs)));
+              continue;
+            }
 
-          const nextClaimableAt = yield* worker.nextClaimableAt.pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning(
-                "Failed to read the next orchestration effect deadline",
-                cause,
-              ).pipe(Effect.as(Option.none<DateTime.Utc>())),
-            ),
-          );
-          const now = DateTime.toEpochMillis(yield* DateTime.now);
-          const sleepMs = Option.match(nextClaimableAt, {
-            onNone: () => livenessPollIntervalMs,
-            onSome: (availableAt) => {
-              const untilAvailable = DateTime.toEpochMillis(availableAt) - now;
-              return Math.min(livenessPollIntervalMs, untilAvailable > 0 ? untilAvailable : 25);
-            },
-          });
-          yield* Effect.raceFirst(
-            worker.awaitWork.pipe(Effect.as("notified" as const)),
-            Effect.sleep(Duration.millis(sleepMs)).pipe(Effect.as("scheduled" as const)),
-          );
-        }
-      });
+            const nextClaimableAt = yield* lane.nextClaimableAt.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  "Failed to read the next orchestration effect deadline",
+                  cause,
+                ).pipe(Effect.as(Option.none<DateTime.Utc>())),
+              ),
+            );
+            const now = DateTime.toEpochMillis(yield* DateTime.now);
+            const sleepMs = Option.match(nextClaimableAt, {
+              onNone: () => livenessPollIntervalMs,
+              onSome: (availableAt) => {
+                const untilAvailable = DateTime.toEpochMillis(availableAt) - now;
+                return Math.min(livenessPollIntervalMs, untilAvailable > 0 ? untilAvailable : 25);
+              },
+            });
+            yield* Effect.raceFirst(
+              lane.awaitWork.pipe(Effect.as("notified" as const)),
+              Effect.sleep(Duration.millis(sleepMs)).pipe(Effect.as("scheduled" as const)),
+            );
+          }
+        });
 
       return yield* Effect.all(
-        Array.from({ length: concurrency }, () => runWorker),
+        [
+          ...Array.from({ length: concurrency }, () => runWorker(worker)),
+          ...(worker.runtimeResponses?.runOnce === undefined
+            ? []
+            : [runWorker(worker.runtimeResponses)]),
+        ],
         {
           concurrency: "unbounded",
           discard: true,

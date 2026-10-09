@@ -198,6 +198,10 @@ const isEffectOutboxError = Schema.is(EffectOutboxError);
 
 export interface EffectOutboxV2Shape {
   readonly awaitAvailable: Effect.Effect<void>;
+  readonly runtimeResponses?: {
+    readonly awaitAvailable: Effect.Effect<void>;
+    readonly nextClaimableAt: Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
+  };
   readonly notifyAvailable: (count?: number) => Effect.Effect<void>;
   /** Persist rows only. Notify workers after the surrounding transaction commits. */
   readonly enqueue: (
@@ -225,6 +229,7 @@ export interface EffectOutboxV2Shape {
     readonly workerId: string;
     readonly leaseDurationMs: number;
     readonly excludeRestartContinuations?: boolean;
+    readonly onlyRuntimeResponses?: boolean;
   }) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
   readonly nextClaimableAt: Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
   readonly succeed: (input: {
@@ -299,12 +304,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
     // authoritative. Retaining a small burst lets multiple worker slots wake
     // for distinct threads without allowing notifications to grow unbounded.
     const available = yield* Queue.dropping<void>(64);
+    const responsesAvailable = yield* Queue.dropping<void>(1);
     const cancellationSignals = new Map<string, Deferred.Deferred<void>>();
     const notifyAvailable = (count = 1) =>
       Queue.offerAll(
         available,
         Array.from({ length: Math.min(64, Math.max(0, Math.floor(count))) }, () => undefined),
-      ).pipe(Effect.asVoid);
+      ).pipe(Effect.andThen(Queue.offer(responsesAvailable, undefined)), Effect.asVoid);
     // Each thread runs its effects one at a time, in enqueue (rowid) order. An earlier
     // effect waiting out a retry backoff still blocks later ones, so a turn
     // cannot start while a failed rollback is about to restore files. A claim
@@ -349,8 +355,81 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                 AND active.effect_type != 'thread-title.generate'
               )
             )
+            AND NOT (
+              candidate.effect_type = 'runtime-request.respond'
+              AND active.effect_type IN ('provider-turn.start', 'provider-turn.restart')
+              AND active.status = 'running'
+              AND EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_runs AS run
+                JOIN orchestration_v2_projection_run_attempts AS attempt
+                  ON attempt.attempt_id = json_extract(run.payload_json, '$.activeAttemptId')
+                  AND attempt.run_id = run.run_id
+                  AND attempt.thread_id = run.thread_id
+                JOIN orchestration_v2_projection_provider_threads AS provider_thread
+                  ON provider_thread.provider_thread_id = attempt.provider_thread_id
+                  AND provider_thread.provider_thread_id = run.provider_thread_id
+                  AND provider_thread.thread_id = run.thread_id
+                JOIN orchestration_v2_projection_threads AS thread
+                  ON thread.thread_id = run.thread_id
+                  AND thread.active_provider_thread_id = provider_thread.provider_thread_id
+                JOIN orchestration_v2_projection_provider_sessions AS session
+                  ON session.provider_session_id = provider_thread.provider_session_id
+                JOIN orchestration_v2_projection_provider_session_bindings AS binding
+                  ON binding.provider_session_id = session.provider_session_id
+                  AND binding.thread_id = run.thread_id
+                JOIN orchestration_v2_projection_runtime_requests AS request
+                  ON request.runtime_request_id = json_extract(candidate.payload_json, '$.requestId')
+                  AND request.thread_id = run.thread_id
+                JOIN orchestration_v2_projection_nodes AS node
+                  ON node.node_id = request.node_id AND node.thread_id = run.thread_id
+                WHERE run.run_id = json_extract(active.payload_json, '$.runId')
+                  AND run.thread_id = active.thread_id
+                  AND run.status = 'running'
+                  AND attempt.status = 'running'
+                  AND attempt.provider_turn_id IS NULL
+                  AND provider_thread.status = 'active'
+                  AND provider_thread.last_run_ordinal = run.ordinal
+                  AND session.status IN ('ready', 'running')
+                  AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
+                  AND request.status = 'resolved'
+                  AND request.provider_turn_id IS NULL
+                  AND request.created_at >= active.updated_at
+                  AND (node.run_id IS NULL OR node.run_id = run.run_id)
+                  AND node.runtime_request_id = request.runtime_request_id
+                  AND json_extract(request.payload_json, '$.responseCapability.type') = 'live'
+                  AND json_extract(request.payload_json, '$.responseCapability.providerSessionId') = session.provider_session_id
+                  AND json_extract(candidate.payload_json, '$.providerSessionId') = session.provider_session_id
+              )
+            )
         )
       `;
+
+    const nextClaimableAt = (onlyRuntimeResponses = false) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ readonly available_at: string | null }>`
+        SELECT MIN(candidate.available_at) AS available_at
+        FROM orchestration_v2_effect_outbox AS candidate
+        WHERE ${claimableCandidatePredicate()}
+          AND ${onlyRuntimeResponses ? sql`candidate.effect_type = 'runtime-request.respond'` : sql`1 = 1`}
+      `.pipe(Effect.withTracerEnabled(false));
+        const availableAt = rows[0]?.available_at;
+        if (availableAt === undefined || availableAt === null) return Option.none();
+        const parsed = DateTime.make(availableAt);
+        if (Option.isNone(parsed)) {
+          return yield* new EffectOutboxError({
+            operation: "next-claimable",
+            cause: `Invalid available_at timestamp: ${availableAt}`,
+          });
+        }
+        return parsed;
+      }).pipe(
+        Effect.mapError((cause) =>
+          isEffectOutboxError(cause)
+            ? cause
+            : new EffectOutboxError({ operation: "next-claimable", cause }),
+        ),
+      );
 
     const cancellationSignal = (effectId: string) => {
       const existing = cancellationSignals.get(effectId);
@@ -421,6 +500,10 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           Effect.mapError((cause) => new EffectOutboxError({ operation: "get", effectId, cause })),
         ),
       awaitAvailable: Queue.take(available),
+      runtimeResponses: {
+        awaitAvailable: Queue.take(responsesAvailable),
+        nextClaimableAt: nextClaimableAt(true),
+      },
       notifyAvailable,
       listByCommandId: (commandId) =>
         sql<EffectRow>`
@@ -515,7 +598,12 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           (cause) => new EffectOutboxError({ operation: "reconcile-process-loss", cause }),
         ),
       ),
-      claimNext: ({ workerId, leaseDurationMs, excludeRestartContinuations = false }) =>
+      claimNext: ({
+        workerId,
+        leaseDurationMs,
+        excludeRestartContinuations = false,
+        onlyRuntimeResponses = false,
+      }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
@@ -538,6 +626,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               SELECT candidate.effect_id
               FROM orchestration_v2_effect_outbox AS candidate
               WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations)}
+                AND ${onlyRuntimeResponses ? sql`candidate.effect_type = 'runtime-request.respond'` : sql`1 = 1`}
                 AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
               LIMIT 1
@@ -550,29 +639,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           cancellationSignals.set(row.effect_id, Deferred.makeUnsafe<void>());
           return Option.some(yield* rowToEffect(row));
         }).pipe(Effect.mapError((cause) => new EffectOutboxError({ operation: "claim", cause }))),
-      nextClaimableAt: Effect.gen(function* () {
-        const rows = yield* sql<{ readonly available_at: string | null }>`
-          SELECT MIN(candidate.available_at) AS available_at
-          FROM orchestration_v2_effect_outbox AS candidate
-          WHERE ${claimableCandidatePredicate()}
-        `.pipe(Effect.withTracerEnabled(false));
-        const availableAt = rows[0]?.available_at;
-        if (availableAt === undefined || availableAt === null) return Option.none();
-        const parsed = DateTime.make(availableAt);
-        if (Option.isNone(parsed)) {
-          return yield* new EffectOutboxError({
-            operation: "next-claimable",
-            cause: `Invalid available_at timestamp: ${availableAt}`,
-          });
-        }
-        return parsed;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isEffectOutboxError(cause)
-            ? cause
-            : new EffectOutboxError({ operation: "next-claimable", cause }),
-        ),
-      ),
+      nextClaimableAt: nextClaimableAt(),
       succeed: ({ effectId, workerId }) =>
         Effect.gen(function* () {
           const now = DateTime.formatIso(yield* DateTime.now);

@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag on main (for example 0.0.4)"
+        description: "Existing release tag on main (for example 0.0.5)"
         required: true
-        default: 0.0.4
+        default: 0.0.5
         type: string
 
 permissions:

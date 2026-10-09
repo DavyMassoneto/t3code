@@ -50,6 +50,8 @@ jobs:
           apps/server/src/provider/piThinkingCapabilities.test.ts
           apps/server/src/provider/Drivers/PiDriver.test.ts
           apps/server/src/orchestration-v2/Adapters/PiAdapterV2.test.ts
+          apps/server/src/orchestration-v2/FoundationPersistence.test.ts
+          apps/server/src/orchestration-v2/EffectWorker.test.ts
           apps/server/src/orchestration-v2/Adapters/piDesktopAutoModeExtensionSource.test.ts
           apps/server/src/orchestration-v2/Adapters/piT3McpInjection.test.ts
           apps/server/src/orchestration-v2/Adapters/piT3McpExtensionSource.test.ts

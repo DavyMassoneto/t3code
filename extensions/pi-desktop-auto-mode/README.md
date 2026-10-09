@@ -7,12 +7,21 @@ does not activate it. Pi Desktop
 selects and activates it through its correlated runtime-policy protocol; activation
 requires explicit confirmation describing risk-based reviews and extra model calls.
 
-While active, every tool call is reviewed using the current session model through
-Pi's native model registry. The reviewer has no tools and receives only the latest
-actual user task and bounded action/cwd/source metadata. Only a strict low-risk
-approval runs automatically. Risky or uncertain results ask you; denied actions
-are blocked with a reason. Other installed extensions remain authoritative, and
-their hooks or dialogs are never overridden or auto-answered.
+While active, verified built-in routine file operations inside the canonical working
+directory can run without model review. Other actions are reviewed using the current
+session model through Pi's native model registry. The reviewer has no tools and
+receives bounded original-task and recent user follow-up context, proposed action,
+cwd, source metadata, and untrusted assistant/tool evidence, excluding hidden thinking.
+A bare "continue" does not replace or expand the original authorization. Explicit
+low- and medium-risk approvals run automatically; high-risk approvals and `ask`
+decisions require explicit confirmation. Denied actions and unavailable reviews
+block with guidance to choose a materially safer alternative, not an equivalent
+workaround. Other installed extensions remain authoritative, and their hooks or
+dialogs are never overridden or auto-answered.
+
+Names-only `ls` and `find` do not inspect file contents. Directory `grep` falls back
+to review when its bounded scan encounters protected paths, links, errors, or more
+than 2,000 entries, so ordinary repository-root content searches may need review.
 
 ## Optional standalone Pi CLI installation
 
@@ -42,16 +51,23 @@ invalidate pending activation confirmations and tool reviews. Stop signals,
 shutdown, and deactivation also cancel pending reviews. No settings or environment variables
 are changed. In standalone Pi, turning this policy off does not add a permission
 gate or disable native tools; Desktop's separate guard owns tool blocking before
-a policy is activated.
+a policy is activated. While active, Auto Mode adds guidance to continue authorized
+work through completion while respecting explicit restrictions, including
+delegation-only and no-direct-edit instructions. It does not expand authorization,
+resubmit prompts, or start a separate autonomous loop. Repeated blocked attempts
+trigger a bounded per-turn failure breaker that aborts the turn.
 
 ## Security and limits
 
 Missing model/API/user task, authentication/network failures, invalid or truncated
-review output, oversized input, and a 15-second timeout require explicit approval.
-No UI, declined/failed confirmations, or stale/cancelled work block execution.
-Each call receives a fresh review, without cached approvals. Reviews add model
-requests and their associated latency/cost; they do not guarantee safety.
+review output, oversized input, and a 15-second timeout block nonroutine actions;
+they do not trigger repeated confirmation prompts. No UI when confirmation is
+required, declined/failed confirmations, or stale/cancelled work block execution.
+Nonroutine calls receive fresh reviews, without cached approvals. Reviews add model
+requests and their associated latency/cost; routine fastpath calls do not. Neither
+review nor canonical-path checking guarantees safety or prevents filesystem races.
 
 **Automatic approvals are NOT a model autonomous loop or retry mechanism, and
-are NOT a security sandbox.** Approved tools can execute arbitrary shell commands,
+are NOT a security sandbox.** This native Pi extension provides no OS isolation.
+Approved tools can execute arbitrary shell commands,
 read or write files, and access the network with the native process's privileges.

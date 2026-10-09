@@ -1,13 +1,14 @@
-# Pi Desktop 0.0.4
+# Pi Desktop 0.0.5
 
-Prepared release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`, replacing blanket Auto Mode execution with per-tool model review and a compact policy picker while keeping the Pi runtime external. Publication is managed by the release owner.
+Prepared release of the independent Pi-focused T3 Code fork maintained in `DavyMassoneto/t3code`, reducing routine Auto Mode review overhead while retaining contextual review and explicit confirmation for consequential actions. The Pi runtime remains external. Publication is managed by the release owner.
 
-## New in 0.0.4
+## New in 0.0.5
 
-- Bundled Pi Desktop Auto Mode reviews every proposed tool call with the currently selected model through `ctx.modelRegistry.streamSimple`. Only an explicit approval classified as low risk executes automatically. Risky or uncertain calls require user confirmation; denied calls are blocked.
-- Malformed review responses, review errors, a missing model, unavailable confirmation UI, and timeouts fail closed: the extension asks the user when possible or blocks the call, never silently allowing execution. Third-party extensions' tool hooks and UI requests remain authoritative and are not overridden or auto-answered.
-- Auto Mode stays inactive until explicitly selected and activated with confirmation. Activation is session-local and resets when a session starts. Each tool review makes an additional model request billed by the selected provider. Auto Mode is not full access and provides no sandbox or isolation guarantee.
-- The policy popup uses a short Auto Mode label and bounded, wrapped descriptions. The activation confirmation retains the full warning, including shell commands, file reads and writes, network access, the lack of a sandbox, and additional provider charges.
+- Fixed the first-prompt Thinking hang after Auto Mode activation confirmation: the persisted response was queued behind the turn-start effect waiting for that same response. A bounded, independently woken response lane now delivers valid live startup confirmations even when lifecycle workers are occupied, while preserving lifecycle ordering and rejecting stale or mismatched-session bypasses. The fix is covered through the real outbox, runtime request service, and Pi adapter RPC path; installed GUI behavior was not visually tested.
+- Verified built-in routine file operations inside the canonical working directory can run without a model review. Other actions use the selected model with bounded original-task and follow-up context; a bare "continue" does not replace or expand the original authorization. Explicit low- and medium-risk approvals run automatically; high-risk approvals and `ask` decisions require explicit confirmation.
+- Denied actions and unavailable, invalid, or timed-out reviews block execution and direct the agent toward a materially safer alternative, not repeated approval prompts or equivalent workarounds. A bounded per-turn failure breaker aborts repeated blocked attempts. Third-party extensions' tool hooks and UI requests remain authoritative and are not overridden or auto-answered.
+- While active, Auto Mode guides the agent to continue authorized work through completion while respecting explicit user restrictions, including delegation-only and no-direct-edit instructions. It does not start a separate autonomous loop, resubmit prompts, or manufacture user approval.
+- Auto Mode stays inactive until explicitly selected and activated with confirmation. Activation is session-local and resets when a session starts. Nonroutine reviews make additional model requests billed by the selected provider. Auto Mode is not full access; its path checks and native extension hooks are not an OS sandbox or an isolation guarantee.
 - The three basic access modes remain available. The separate full-access bypass is unchanged; the Supervised and Auto-accept edits modes remain available. Native Auto Mode is an explicit opt-in policy, not a replacement name for full access.
 
 ## Inherited from 0.0.3

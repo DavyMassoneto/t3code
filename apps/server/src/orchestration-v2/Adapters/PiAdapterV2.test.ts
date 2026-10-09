@@ -4,6 +4,9 @@ import * as NodeVM from "node:vm";
 import { PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE } from "./piDesktopAutoModeExtensionSource.ts";
 import {
   CheckpointId,
+  CommandId,
+  EventId,
+  MessageId,
   EnvironmentId,
   NodeId,
   ProviderInstanceId,
@@ -21,17 +24,20 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as SqlClient from "effect/sql/SqlClient";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 
@@ -39,6 +45,20 @@ import * as ServerConfig from "../../config.ts";
 import * as ProviderContinuationRequests from "../ProviderContinuationRequests.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as IdAllocator from "../IdAllocator.ts";
+import * as SqlitePersistence from "../../persistence/Sqlite.ts";
+import * as EffectOutbox from "../EffectOutbox.ts";
+import * as EffectWorker from "../EffectWorker.ts";
+import * as ProjectionStore from "../ProjectionStore.ts";
+import * as RuntimeRequestService from "../RuntimeRequestService.ts";
+import * as ProviderSessionManager from "../ProviderSessionManager.ts";
+import * as ProviderTurnStartService from "../ProviderTurnStartService.ts";
+import * as ProviderTurnControlService from "../ProviderTurnControlService.ts";
+import * as RunFinalizationService from "../RunFinalizationService.ts";
+import * as ResourceCleanupService from "../ResourceCleanupService.ts";
+import * as CheckpointRollbackService from "../CheckpointRollbackService.ts";
+import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationService.ts";
+import * as ThreadManagementService from "../ThreadManagementService.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
@@ -557,6 +577,383 @@ const acknowledgePolicy = (
 };
 
 describe("Pi runtime policy activation", () => {
+  it.effect.each(["accept", "decline", "error", "cancel", "stop", "restart"] as const)(
+    "delivers persisted desktop startup confirmation through a saturated daemon: %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const fake = yield* makeFakePi;
+        const commands: PiRpcRecord[] = [];
+        NodeVM.runInNewContext(
+          `(${PI_DESKTOP_AUTO_MODE_EXTENSION_SOURCE.replace("export default ", "")})`,
+        )({
+          on: () => {},
+          registerCommand: (name: string, command: { description: string }) =>
+            commands.push({ name, source: "extension", description: command.description }),
+        });
+        fake.setPolicyCatalog([guardCommand, ...commands]);
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const thread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const now = yield* DateTime.now;
+        const runId = RunId.make(`run:${THREAD_ID}:1`);
+        const attemptId = RunAttemptId.make(`run-attempt:${runId}:1`);
+        const commandId = CommandId.make("desktop-first-prompt");
+        const firstPrompt = "Você vai ser o orquestrador para continuar este projeto. Entendido?";
+        const accepted = outcome === "accept" || outcome === "restart";
+        const rootNodeId = NodeId.make(`node:${runId}:root`);
+        const appThread = {
+          ...(yield* makeAppThread("default")),
+          activeProviderThreadId: thread.id,
+        };
+        const common = { threadId: THREAD_ID, occurredAt: now, providerInstanceId: PI_INSTANCE_ID };
+        yield* projections.apply({
+          ...common,
+          id: EventId.make("desktop-thread"),
+          type: "thread.created",
+          payload: appThread,
+        });
+        yield* projections.apply({
+          ...common,
+          id: EventId.make("desktop-session"),
+          type: "provider-session.attached",
+          driver: PI_PROVIDER,
+          payload: runtime.providerSession,
+        });
+        yield* projections.apply({
+          ...common,
+          id: EventId.make("desktop-provider-thread"),
+          type: "provider-thread.updated",
+          driver: PI_PROVIDER,
+          payload: { ...thread, status: "active", lastRunOrdinal: 1, firstRunOrdinal: 1 },
+        });
+        yield* projections.apply({
+          ...common,
+          id: EventId.make("desktop-run"),
+          type: "run.created",
+          runId,
+          payload: {
+            id: runId,
+            threadId: THREAD_ID,
+            ordinal: 1,
+            providerInstanceId: PI_INSTANCE_ID,
+            modelSelection: policySelection("desktop-auto"),
+            providerThreadId: thread.id,
+            userMessageId: MessageId.make("desktop-first-message"),
+            rootNodeId,
+            activeAttemptId: attemptId,
+            status: "running",
+            queuePosition: null,
+            requestedAt: now,
+            startedAt: now,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+        yield* projections.apply({
+          ...common,
+          id: EventId.make("desktop-attempt"),
+          type: "run-attempt.updated",
+          runId,
+          payload: {
+            id: attemptId,
+            runId,
+            attemptOrdinal: 1,
+            rootNodeId,
+            providerInstanceId: PI_INSTANCE_ID,
+            providerThreadId: thread.id,
+            providerTurnId: null,
+            reason: "initial",
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+          },
+        });
+        let currentRuntime = runtime;
+        let currentThread = thread;
+        let recovering = false;
+        const restartSteps: string[] = [];
+        const oldSessionId = ProviderSessionId.make("desktop-original-session");
+        const sessions = Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          get: (sessionId) =>
+            Effect.succeed(sessionId === SESSION_ID ? Option.some(currentRuntime) : Option.none()),
+          detach: () =>
+            Effect.sync(() => {
+              restartSteps.push("detach");
+            }),
+        });
+        const responses = yield* RuntimeRequestService.RuntimeRequestServiceV2.pipe(
+          Effect.provide(RuntimeRequestService.layer.pipe(Layer.provide(sessions))),
+        );
+        const settled = yield* Queue.unbounded<string>();
+        const startInterrupted = yield* Deferred.make<void>();
+        const observedOutbox = {
+          ...outbox,
+          succeed: (input: Parameters<typeof outbox.succeed>[0]) =>
+            outbox.succeed(input).pipe(Effect.tap(() => Queue.offer(settled, input.effectId))),
+          fail: (input: Parameters<typeof outbox.fail>[0]) =>
+            outbox.fail(input).pipe(Effect.tap(() => Queue.offer(settled, input.effectId))),
+        };
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+          Effect.provide(
+            EffectWorker.layerExecutor.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  sessions,
+                  Layer.succeed(RuntimeRequestService.RuntimeRequestServiceV2, responses),
+                  Layer.mock(ProviderTurnStartService.ProviderTurnStartServiceV2)({
+                    start: (input) =>
+                      Effect.gen(function* () {
+                        assert.equal(input.runId, recovering ? `run:${THREAD_ID}:2` : runId);
+                        restartSteps.push("start");
+                        yield* startTurn(
+                          currentRuntime,
+                          currentThread,
+                          "default",
+                          [],
+                          recovering ? "Recovery prompt" : firstPrompt,
+                          recovering ? modelSelection("default") : policySelection("desktop-auto"),
+                          recovering ? 2 : 1,
+                          THREAD_ID,
+                          false,
+                          recovering ? "full-access" : "auto",
+                        );
+                      }).pipe(
+                        Effect.mapError(
+                          (cause) =>
+                            new ProviderTurnStartService.ProviderTurnStartError({ runId, cause }),
+                        ),
+                        Effect.onInterrupt(() => Deferred.succeed(startInterrupted, undefined)),
+                      ),
+                  }),
+                  Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({
+                    interruptAndAwaitTerminal: () =>
+                      Effect.sync(() => {
+                        restartSteps.push("interrupt");
+                      }),
+                  }),
+                  Layer.mock(RunFinalizationService.RunFinalizationService)({}),
+                  Layer.mock(ResourceCleanupService.ResourceCleanupService)({}),
+                  Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
+                  Layer.mock(ThreadTitleRegenerationService.ThreadTitleRegenerationService)({}),
+                  Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+                  ServerSettings.layerTest(),
+                ),
+              ),
+            ),
+          ),
+        );
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+          Effect.provide(EffectWorker.layerWithOptions({ maxAttempts: 1 })),
+          Effect.provideService(EffectOutbox.EffectOutboxV2, observedOutbox),
+          Effect.provideService(EffectWorker.OrchestrationEffectExecutorV2, executor),
+        );
+        yield* outbox.enqueue([
+          {
+            id: "desktop-start",
+            commandId,
+            threadId: THREAD_ID,
+            request:
+              outcome === "restart"
+                ? {
+                    type: "provider-turn.restart",
+                    runId,
+                    providerSessionId: oldSessionId,
+                    providerThreadId: thread.id,
+                    providerTurnId: ProviderTurnId.make("desktop-original-turn"),
+                    interruptedAttemptId: RunAttemptId.make("desktop-original-attempt"),
+                    sessionTransition: {
+                      type: "replace",
+                      replacementProviderSessionId: SESSION_ID,
+                    },
+                  }
+                : { type: "provider-turn.start", runId },
+          },
+        ]);
+        yield* EffectWorker.runDaemonWithOptions({ concurrency: 1 }).pipe(
+          Effect.provideService(EffectWorker.OrchestrationEffectWorkerV2, worker),
+          Effect.forkScoped,
+        );
+        const activation = yield* takePolicyPrompt(fake, "pi-desktop-policy-desktop-auto");
+        if (outcome === "restart") assert.deepEqual(restartSteps, ["interrupt", "detach", "start"]);
+        yield* fake.emit({
+          type: "extension_ui_request",
+          id: "startup-confirmation",
+          method: "confirm",
+          title: "Enable Auto Mode?",
+          message: "Auto Mode reviews every tool call...",
+        });
+        const pending = yield* takeEvent(
+          (event) =>
+            event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+        );
+        const node = yield* takeEvent(
+          (event) => event.type === "node.updated" && event.node.runtimeRequestId !== null,
+        );
+        if (pending.type !== "runtime_request.updated" || node.type !== "node.updated")
+          return yield* Effect.die("Missing startup confirmation");
+        const decision =
+          accepted || outcome === "error" ? "accept" : outcome === "decline" ? "decline" : "cancel";
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* projections.apply({
+              id: EventId.make("confirmation-node"),
+              type: "node.updated",
+              threadId: THREAD_ID,
+              occurredAt: now,
+              payload: { ...node.node, status: "completed", completedAt: now },
+            });
+            yield* projections.apply({
+              id: EventId.make("confirmation-response"),
+              type: "runtime-request.updated",
+              threadId: THREAD_ID,
+              occurredAt: now,
+              payload: { ...pending.runtimeRequest, status: "resolved", resolvedAt: now, decision },
+            });
+            yield* outbox.enqueue([
+              {
+                id: "desktop-response",
+                commandId,
+                threadId: THREAD_ID,
+                request: {
+                  type: "runtime-request.respond",
+                  providerSessionId: SESSION_ID,
+                  requestId: pending.runtimeRequest.id,
+                  decision,
+                },
+              },
+            ]);
+            if (outcome === "stop") {
+              yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'cancelled'`;
+              const cancelled = yield* outbox.cancelUnsettled({
+                threadId: THREAD_ID,
+                effectTypes: ["provider-turn.start", "runtime-request.respond"],
+                reason: "User Stop",
+              });
+              yield* outbox.signalCancellations(cancelled);
+            }
+          }),
+        );
+        yield* outbox.notifyAvailable();
+        if (outcome === "stop") {
+          yield* Deferred.await(startInterrupted);
+          assert.isFalse(
+            fake.allRequests().some((request) => request["type"] === "extension_ui_response"),
+          );
+        } else {
+          const answer = yield* fake.takeRequest("extension_ui_response");
+          assert.equal(answer["id"], "startup-confirmation");
+          assert.equal(
+            answer[outcome === "cancel" ? "cancelled" : "confirmed"],
+            outcome !== "decline",
+          );
+          yield* acknowledgePolicy(fake, activation, accepted);
+          const completions = [yield* Queue.take(settled), yield* Queue.take(settled)];
+          assert.sameMembers(completions, ["desktop-start", "desktop-response"]);
+          assert.equal(
+            Option.getOrThrow(yield* outbox.get("desktop-start")).status,
+            accepted ? "succeeded" : "failed",
+          );
+          assert.equal(
+            Option.getOrThrow(yield* outbox.get("desktop-response")).status,
+            "succeeded",
+          );
+        }
+        if (accepted) {
+          yield* takeUserPrompt(fake, firstPrompt);
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+          yield* fake.emit({
+            type: "message_update",
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Entendido." },
+          });
+          yield* fake.emit({
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "Entendido." }] },
+          });
+          yield* takeEvent(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.text === "Entendido.",
+          );
+        } else {
+          assert.isFalse(fake.allRequests().some((request) => request["message"] === firstPrompt));
+          const recoveredFake = yield* makeFakePi;
+          const recovered = yield* openRuntime(recoveredFake);
+          const recoveredThread = yield* recovered.runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          currentRuntime = recovered.runtime;
+          currentThread = recoveredThread;
+          recovering = true;
+          const sourceRun = (yield* projections.getThreadRecords(THREAD_ID, ["runs"])).runs.find(
+            (run) => run.id === runId,
+          );
+          if (sourceRun === undefined) return yield* Effect.die("Missing original desktop run");
+          const recoveryRunId = RunId.make(`run:${THREAD_ID}:2`);
+          yield* projections.apply({
+            ...common,
+            id: EventId.make("desktop-failed-run"),
+            type: "run.updated",
+            runId,
+            payload: {
+              ...sourceRun,
+              status: outcome === "stop" ? "cancelled" : "failed",
+              completedAt: now,
+            },
+          });
+          yield* projections.apply({
+            ...common,
+            id: EventId.make("desktop-recovery-run"),
+            type: "run.created",
+            runId: recoveryRunId,
+            payload: {
+              ...sourceRun,
+              id: recoveryRunId,
+              ordinal: 2,
+              status: "starting",
+              userMessageId: MessageId.make("desktop-recovery-message"),
+              modelSelection: modelSelection("default"),
+              providerThreadId: currentThread.id,
+              rootNodeId: null,
+              activeAttemptId: null,
+              startedAt: null,
+              completedAt: null,
+            },
+          });
+          yield* outbox.enqueue([
+            {
+              id: "desktop-recovery",
+              commandId,
+              threadId: THREAD_ID,
+              request: { type: "provider-turn.start", runId: recoveryRunId },
+            },
+          ]);
+          yield* outbox.notifyAvailable();
+          assert.equal(yield* Queue.take(settled), "desktop-recovery");
+          yield* takeUserPrompt(recoveredFake, "Recovery prompt");
+        }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest,
+            Layer.mergeAll(EffectOutbox.layer, ProjectionStore.layer).pipe(
+              Layer.provideMerge(SqlitePersistence.layerMemory),
+            ),
+          ),
+        ),
+      ),
+  );
   it.effect("activates bundled Auto Mode only from its live descriptor and correlated ACK", () =>
     Effect.gen(function* () {
       const commands: PiRpcRecord[] = [];

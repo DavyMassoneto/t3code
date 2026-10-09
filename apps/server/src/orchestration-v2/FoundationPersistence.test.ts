@@ -22,6 +22,7 @@ import {
   ProviderThreadId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -93,6 +94,200 @@ const modelSelection = {
   instanceId: providerInstanceId,
   model: "gpt-5.4",
 } satisfies ModelSelection;
+
+const seedStartupResponseOwnership = Effect.fnUntraced(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const now = DateTime.formatIso(yield* DateTime.now);
+  const threadId = ThreadId.make("thread:startup-response");
+  const runId = RunId.make("run:startup-response");
+  const sessionId = ProviderSessionId.make("session:startup-response");
+  const requestId = RuntimeRequestId.make("request:startup-response");
+  yield* sql`INSERT INTO orchestration_v2_projection_threads
+    (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, active_provider_thread_id, created_at, updated_at, payload_json)
+    VALUES (${threadId}, 'project', 'Startup', 'pi', 'auto', 'default', 'provider-thread:startup', ${now}, ${now}, '{}')`;
+  yield* sql`INSERT INTO orchestration_v2_projection_runs
+    (run_id, thread_id, ordinal, provider, provider_thread_id, status, requested_at, payload_json)
+    VALUES (${runId}, ${threadId}, 1, 'pi', 'provider-thread:startup', 'running', ${now}, '{"activeAttemptId":"attempt:startup"}')`;
+  yield* sql`INSERT INTO orchestration_v2_projection_run_attempts
+    (attempt_id, thread_id, run_id, attempt_ordinal, root_node_id, provider, provider_thread_id, status, payload_json)
+    VALUES ('attempt:startup', ${threadId}, ${runId}, 1, 'root:startup', 'pi', 'provider-thread:startup', 'running', '{}')`;
+  yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+    (provider_thread_id, thread_id, provider, provider_session_id, status, last_run_ordinal, updated_at, payload_json)
+    VALUES ('provider-thread:startup', ${threadId}, 'pi', ${sessionId}, 'active', 1, ${now}, '{}')`;
+  yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions
+    (provider_session_id, thread_id, provider, status, updated_at, payload_json)
+    VALUES (${sessionId}, ${threadId}, 'pi', 'ready', ${now}, '{}')`;
+  yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
+    (provider_session_id, thread_id) VALUES (${sessionId}, ${threadId})`;
+  yield* sql`INSERT INTO orchestration_v2_projection_nodes
+    (node_id, thread_id, root_node_id, kind, status, runtime_request_id, payload_json)
+    VALUES ('node:startup-confirm', ${threadId}, 'node:startup-confirm', 'approval_request', 'completed', ${requestId}, '{}')`;
+  yield* sql`INSERT INTO orchestration_v2_projection_runtime_requests
+    (runtime_request_id, thread_id, node_id, kind, status, created_at, resolved_at, payload_json)
+    VALUES (${requestId}, ${threadId}, 'node:startup-confirm', 'command', 'resolved', ${now}, ${now},
+      ${JSON.stringify({ responseCapability: { type: "live", providerSessionId: sessionId } })})`;
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const commandId = CommandId.make("command:startup-response");
+  yield* outbox.enqueue([
+    {
+      id: "effect:startup-start",
+      threadId,
+      commandId,
+      request: { type: "provider-turn.start", runId },
+    },
+    {
+      id: "effect:startup-response",
+      threadId,
+      commandId,
+      request: {
+        type: "runtime-request.respond",
+        providerSessionId: sessionId,
+        requestId,
+        decision: "accept",
+      },
+    },
+  ]);
+  assert.equal(
+    Option.getOrUndefined(yield* outbox.claimNext({ workerId: "start", leaseDurationMs: 30_000 }))
+      ?.id,
+    "effect:startup-start",
+  );
+  return { sql, outbox, threadId, runId, sessionId, requestId };
+});
+
+it.effect("claims only an owned startup response while its start is running", () =>
+  Effect.gen(function* () {
+    const { outbox, threadId } = yield* seedStartupResponseOwnership();
+    yield* outbox.enqueue([
+      {
+        id: "effect:startup-cleanup",
+        threadId,
+        commandId: CommandId.make("cleanup"),
+        request: { type: "terminal.cleanup" },
+      },
+    ]);
+    assert.isTrue(Option.isSome(yield* outbox.runtimeResponses!.nextClaimableAt));
+    const response = yield* outbox.claimNext({
+      workerId: "response",
+      leaseDurationMs: 30_000,
+      onlyRuntimeResponses: true,
+    });
+    assert.equal(Option.getOrUndefined(response)?.id, "effect:startup-response");
+    assert.isTrue(
+      Option.isNone(yield* outbox.claimNext({ workerId: "other", leaseDurationMs: 30_000 })),
+    );
+    assert.isTrue(Option.isNone(yield* outbox.runtimeResponses!.nextClaimableAt));
+  }).pipe(Effect.provide(layerIsolatedOutbox)),
+);
+
+it.effect.each(["current-session", "original-session"] as const)(
+  "guards restart startup responses for %s",
+  (destination) =>
+    Effect.gen(function* () {
+      const { sql, outbox } = yield* seedStartupResponseOwnership();
+      yield* sql`UPDATE orchestration_v2_effect_outbox SET effect_type = 'provider-turn.restart',
+      payload_json = json_set(payload_json, '$.type', 'provider-turn.restart', '$.providerSessionId', 'original-session')
+      WHERE effect_id = 'effect:startup-start'`;
+      if (destination === "original-session") {
+        yield* sql`UPDATE orchestration_v2_effect_outbox SET payload_json = json_set(payload_json, '$.providerSessionId', 'original-session') WHERE effect_id = 'effect:startup-response'`;
+        yield* sql`UPDATE orchestration_v2_projection_runtime_requests SET payload_json = json_set(payload_json, '$.responseCapability.providerSessionId', 'original-session')`;
+      }
+      const claim = yield* outbox.claimNext({
+        workerId: "response",
+        leaseDurationMs: 30_000,
+        onlyRuntimeResponses: true,
+      });
+      assert.equal(Option.isSome(claim), destination === "current-session");
+      if (Option.isSome(claim)) assert.equal(claim.value.id, "effect:startup-response");
+    }).pipe(Effect.provide(layerIsolatedOutbox)),
+);
+
+it.effect.each([
+  "cancelled-run",
+  "replaced-attempt",
+  "wrong-session",
+  "unbound-session",
+  "old-request",
+  "newer-run",
+  "closed-session",
+  "archived-thread",
+  "turn-owned-request",
+  "foreign-node",
+  "unresolved-request",
+  "queued-rollback",
+  "running-response",
+  "cancelled-response",
+] as const)("does not bypass startup ordering for %s", (scenario) =>
+  Effect.gen(function* () {
+    const { sql, outbox, threadId } = yield* seedStartupResponseOwnership();
+    switch (scenario) {
+      case "cancelled-run":
+        yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'cancelled'`;
+        break;
+      case "replaced-attempt":
+        yield* sql`UPDATE orchestration_v2_projection_runs SET payload_json = '{"activeAttemptId":"other"}'`;
+        break;
+      case "wrong-session":
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads SET provider_session_id = 'other'`;
+        break;
+      case "unbound-session":
+        yield* sql`DELETE FROM orchestration_v2_projection_provider_session_bindings`;
+        break;
+      case "old-request":
+        yield* sql`UPDATE orchestration_v2_projection_runtime_requests SET created_at = '0001-01-01T00:00:00.000Z'`;
+        break;
+      case "newer-run":
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads SET last_run_ordinal = 2`;
+        break;
+      case "closed-session":
+        yield* sql`UPDATE orchestration_v2_projection_provider_sessions SET status = 'closed'`;
+        break;
+      case "archived-thread":
+        yield* sql`UPDATE orchestration_v2_projection_threads SET archived_at = '2026-10-09T00:00:00.000Z'`;
+        break;
+      case "turn-owned-request":
+        yield* sql`UPDATE orchestration_v2_projection_runtime_requests SET provider_turn_id = 'old-turn'`;
+        break;
+      case "foreign-node":
+        yield* sql`UPDATE orchestration_v2_projection_nodes SET run_id = 'other'`;
+        break;
+      case "unresolved-request":
+        yield* sql`UPDATE orchestration_v2_projection_runtime_requests SET status = 'pending'`;
+        break;
+      case "cancelled-response":
+        yield* outbox.cancelUnsettled({
+          threadId,
+          effectTypes: ["runtime-request.respond"],
+          reason: "Stopped",
+        });
+        break;
+      case "running-response":
+      case "queued-rollback": {
+        yield* outbox.enqueue([
+          {
+            id: "effect:startup-other",
+            threadId,
+            commandId: CommandId.make("other"),
+            request: { type: "terminal.cleanup" },
+          },
+        ]);
+        yield* sql`UPDATE orchestration_v2_effect_outbox SET effect_type = ${scenario === "running-response" ? "runtime-request.respond" : "provider-thread.rollback"}, status = ${scenario === "running-response" ? "running" : "pending"} WHERE effect_id = 'effect:startup-other'`;
+        yield* sql`UPDATE orchestration_v2_effect_outbox SET rowid = 100 WHERE effect_id = 'effect:startup-response'`;
+        break;
+      }
+    }
+    assert.isTrue(
+      Option.isNone(
+        yield* outbox.claimNext({
+          workerId: "response",
+          leaseDurationMs: 30_000,
+          onlyRuntimeResponses: true,
+        }),
+      ),
+    );
+    assert.isTrue(Option.isNone(yield* outbox.runtimeResponses!.nextClaimableAt));
+  }).pipe(Effect.provide(layerIsolatedOutbox)),
+);
 
 function makeThread(threadId: ThreadId, now: DateTime.Utc): OrchestrationV2AppThread {
   return {

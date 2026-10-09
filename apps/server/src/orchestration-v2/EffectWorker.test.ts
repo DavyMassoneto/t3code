@@ -644,6 +644,54 @@ it.effect("keeps a max-attempt replay-safe failure terminal when fail settlement
   }),
 );
 
+it.effect.each([1, 4])(
+  "reserves one bounded responder when %i lifecycle slots are occupied",
+  (concurrency) =>
+    Effect.gen(function* () {
+      const started = yield* Ref.make(0);
+      const allStarted = yield* Deferred.make<void>();
+      const releaseStarts = yield* Deferred.make<void>();
+      const responses = yield* Queue.unbounded<number>();
+      const responseStarted = yield* Queue.unbounded<number>();
+      const releaseResponse = yield* Deferred.make<void>();
+      const regularWork = Effect.gen(function* () {
+        if ((yield* Ref.updateAndGet(started, (count) => count + 1)) === concurrency)
+          yield* Deferred.succeed(allStarted, undefined);
+        yield* Deferred.await(releaseStarts);
+        return false;
+      });
+      const worker = EffectWorker.OrchestrationEffectWorkerV2.of({
+        awaitWork: Effect.never,
+        runOnce: regularWork,
+        runRecoveryOnce: Effect.succeed(false),
+        nextClaimableAt: Effect.succeed(Option.none()),
+        drain: () => Effect.succeed(0),
+        runtimeResponses: {
+          awaitWork: Effect.never,
+          nextClaimableAt: Effect.succeed(Option.none()),
+          runOnce: Effect.gen(function* () {
+            const response = yield* Queue.take(responses);
+            yield* Queue.offer(responseStarted, response);
+            yield* Deferred.await(releaseResponse);
+            yield* Deferred.succeed(releaseStarts, undefined);
+            return true;
+          }),
+        },
+      });
+      yield* EffectWorker.runDaemonWithOptions({ concurrency }).pipe(
+        Effect.provideService(EffectWorker.OrchestrationEffectWorkerV2, worker),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(allStarted);
+      yield* Queue.offerAll(responses, [1, 2]);
+      assert.equal(yield* Queue.take(responseStarted), 1);
+      assert.equal(yield* Queue.size(responses), 1);
+      assert.equal(yield* Ref.get(started), concurrency);
+      yield* Deferred.succeed(releaseResponse, undefined);
+      assert.equal(yield* Queue.take(responseStarted), 2);
+    }).pipe(Effect.scoped),
+);
+
 it.effect("uses durable deadlines, notifications, and a slow liveness poll", () =>
   Effect.gen(function* () {
     const attempts = yield* Ref.make(0);

@@ -31,19 +31,28 @@ command `pi-desktop-policy-desktop-auto` advertises the discovery descriptor thr
 `get_commands`. Discovery loads this extension without injecting the MCP bridge.
 
 Loading the extension leaves it passive and inactive. Activation confirms risk-based
-reviews and extra model calls, not blanket tool access. Every active `tool_call` uses
-the current session model through native `ctx.modelRegistry.streamSimple`, without
-reviewer tools. Only strict JSON `approve` plus `low` runs automatically; risky or
-uncertain actions require explicit confirmation and `deny` blocks with a reason.
-The reviewer receives only the latest actual user task and bounded proposed action,
-cwd, and tool source metadata, never assistant/tool text as user authorization.
-Missing context/API/model, malformed or incomplete results, oversized input, and a
-15-second review timeout fall back to confirmation, never automatic approval. No UI,
-declined/failed confirmations, and cancelled or superseded work block execution.
-Stop signals, session changes, shutdown, and deactivation invalidate pending reviews.
-Other extensions' hooks and dialogs remain authoritative and are not auto-answered.
-State is session-local. Reviews are not a safety guarantee, autonomous loop, retry
-mechanism, or security sandbox.
+reviews and extra model calls, not blanket tool access. Verified built-in routine file
+operations within the canonical working directory may skip model review; unverified
+tool provenance or paths fall through to review. These checks are not OS isolation
+and do not eliminate filesystem races. Other actions use the current session model
+through native `ctx.modelRegistry.streamSimple`, without reviewer tools. Strict JSON
+`approve` with `low` or `medium` runs automatically; `high` or `ask` requires explicit
+confirmation. `deny` and unavailable reviews block with safer-alternative guidance,
+not a confirmation fallback. Missing context/API/model, malformed or incomplete
+results, oversized input, and a 15-second timeout count as unavailable reviews.
+
+The bounded reviewer context retains the original user task and recent actual user
+follow-ups; "continue" does not replace or expand the original authorization.
+Assistant/tool evidence is untrusted context, not authorization, and hidden thinking
+is excluded. Active-only autonomy guidance preserves explicit user restrictions,
+including delegation-only and no-direct-edit instructions, and discourages equivalent
+workarounds after a block. A bounded per-turn failure breaker calls `ctx.abort` after
+repeated blocked attempts; it is not a retry mechanism or a separate agent loop.
+Unavailable confirmation UI, declined/failed confirmations, and cancelled or
+superseded work block execution. Stop signals, session changes, shutdown, and
+deactivation invalidate pending reviews. Other extensions' hooks and dialogs remain
+authoritative and are not auto-answered. State is session-local. This native extension
+is not a security sandbox and provides no equivalent OS isolation guarantee.
 
 Standalone CLI usage, optional installation, and security limits are documented in
 `extensions/pi-desktop-auto-mode/README.md`.
@@ -69,7 +78,14 @@ fresh bounded wait after the user responds. Stop cancels the dialog and retires 
 ACK notifications are reserved control messages consumed by the adapter's single event pump;
 they are not conversation messages or visible work-log notifications. ACK coordination occurs
 before the event permit used for turn publication, so real confirm/input/select/editor dialogs
-can travel to the UI and receive responses while activation waits.
+can travel to the UI and receive responses while activation waits. Persisted runtime-request
+responses also need a bounded, independently woken worker lane: turn start can hold the normal
+outbox lane while waiting for an activation ACK that itself requires delivery of the user's
+response. Projecting the request as resolved does not mean Pi has received that response.
+The outbox permits only a valid live startup response to bypass its waiting start effect;
+stale or mismatched-session responses and earlier lifecycle or rollback work retain their
+ordering constraints. This breaks the confirmed first-prompt queue deadlock without broadly
+relaxing lifecycle ordering, including when all normal worker slots are occupied.
 
 The injected bridge starts Auto with every tool blocked. Its private command
 `t3-pi-runtime-policy-state <sessionToken> <mode> <policyId-or-dash> <requestId>` updates that

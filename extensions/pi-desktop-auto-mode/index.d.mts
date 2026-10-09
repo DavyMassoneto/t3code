@@ -2,6 +2,7 @@ export interface PiDesktopAutoModeContext {
   readonly hasUI: boolean;
   readonly cwd: string;
   readonly signal?: AbortSignal;
+  readonly abort?: () => void;
   readonly model?: unknown;
   readonly modelRegistry?: {
     readonly streamSimple: (
@@ -35,7 +36,13 @@ export interface PiDesktopAutoModeContext {
 export interface PiDesktopAutoModeAPI {
   readonly getAllTools?: () => Array<{ name: string; sourceInfo?: unknown }>;
   readonly on: (
-    event: "session_start" | "session_shutdown" | "agent_end" | "tool_call",
+    event:
+      | "session_start"
+      | "session_shutdown"
+      | "agent_start"
+      | "before_agent_start"
+      | "agent_end"
+      | "tool_call",
     handler: (event: unknown, ctx: PiDesktopAutoModeContext) => unknown,
   ) => void;
   readonly registerCommand: (
